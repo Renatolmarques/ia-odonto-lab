@@ -1,11 +1,11 @@
-version: "3.9"
-
 services:
   api:
     build: .
     container_name: ia-odonto-api
     ports:
       - "8000:8000"
+    volumes:
+      - ./:/app
     env_file:
       - .env
     depends_on:
@@ -13,18 +13,17 @@ services:
     restart: unless-stopped
 
   db:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg16
     container_name: ia-odonto-db
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: postgres
+      POSTGRES_DB: ia_odonto
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
 
 volumes:
   pgdata:
-
