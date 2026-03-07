@@ -30,7 +30,9 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 TODAY = date.today().isoformat()
@@ -41,10 +43,10 @@ def _mariadb_engine():
     """Builds SQLAlchemy engine for MariaDB (EspoCRM billing database)."""
     host = os.getenv("MARIADB_HOST", "ia_mariadb")
     port = os.getenv("MARIADB_PORT", "3306")
-    db   = os.getenv("MARIADB_DATABASE", "espocrm")
+    db = os.getenv("MARIADB_DATABASE", "espocrm")
     user = os.getenv("MARIADB_USER", "")
-    pwd  = os.getenv("MARIADB_PASSWORD", "")
-    url  = f"mysql+pymysql://{user}:{pwd}@{host}:{port}/{db}"
+    pwd = os.getenv("MARIADB_PASSWORD", "")
+    url = f"mysql+pymysql://{user}:{pwd}@{host}:{port}/{db}"
     return create_engine(url, pool_pre_ping=True)
 
 
@@ -52,10 +54,10 @@ def _postgres_engine():
     """Builds SQLAlchemy engine for PostgreSQL (pgvector / lab2 database)."""
     host = os.getenv("DB_HOST_LOCAL", "localhost")
     port = os.getenv("DB_PORT_LOCAL", "5433")
-    db   = os.getenv("DB_NAME", "ia_odonto")
+    db = os.getenv("DB_NAME", "ia_odonto")
     user = os.getenv("DB_USER", "postgres")
-    pwd  = os.getenv("DB_PASSWORD", "postgres")
-    url  = f"postgresql+psycopg://{user}:{pwd}@{host}:{port}/{db}"
+    pwd = os.getenv("DB_PASSWORD", "postgres")
+    url = f"postgresql+psycopg://{user}:{pwd}@{host}:{port}/{db}"
     return create_engine(url, pool_pre_ping=True)
 
 
@@ -66,7 +68,8 @@ def export_recebimentos():
     Always filters deleted=0 for soft-deleted rows.
     """
     logger.info("[1/2] Exporting c_recebimento (MariaDB)...")
-    query = text("""
+    query = text(
+        """
         SELECT
             id,
             contato_id,
@@ -78,7 +81,8 @@ def export_recebimentos():
             modified_at
         FROM c_recebimento
         WHERE deleted = 0
-    """)
+    """
+    )
     try:
         engine = _mariadb_engine()
         with engine.connect() as conn:
@@ -86,8 +90,12 @@ def export_recebimentos():
         out_path = BRONZE_PATH / "c_recebimento" / f"dt={TODAY}"
         out_path.mkdir(parents=True, exist_ok=True)
         df.to_parquet(out_path / "data.parquet", index=False)
-        logger.info("      Saved: %s (%d rows, %.0f KB)", out_path / "data.parquet",
-                    len(df), (out_path / "data.parquet").stat().st_size / 1024)
+        logger.info(
+            "      Saved: %s (%d rows, %.0f KB)",
+            out_path / "data.parquet",
+            len(df),
+            (out_path / "data.parquet").stat().st_size / 1024,
+        )
     except Exception as exc:
         logger.error("Failed to export c_recebimento: %s", str(exc))
         logger.error("Check MARIADB_HOST, MARIADB_USER, MARIADB_PASSWORD in .env")
@@ -108,8 +116,12 @@ def export_rag_audit():
         out_path = BRONZE_PATH / "rag_audit" / f"dt={TODAY}"
         out_path.mkdir(parents=True, exist_ok=True)
         df.to_parquet(out_path / "data.parquet", index=False)
-        logger.info("      Saved: %s (%d rows, %.0f KB)", out_path / "data.parquet",
-                    len(df), (out_path / "data.parquet").stat().st_size / 1024)
+        logger.info(
+            "      Saved: %s (%d rows, %.0f KB)",
+            out_path / "data.parquet",
+            len(df),
+            (out_path / "data.parquet").stat().st_size / 1024,
+        )
     except Exception as exc:
         logger.error("Failed to export RAG audit: %s", str(exc))
 
