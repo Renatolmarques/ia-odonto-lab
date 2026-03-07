@@ -19,7 +19,7 @@ requests==2.32.3
 # ── Banco de Dados ───────────────────────────
 psycopg[binary]==3.2.3
 psycopg2-binary==2.9.10
-pgvector==0.3.6
+pgvector==0.2.5
 sqlalchemy==2.0.36
 
 # ── IA / LangChain ───────────────────────────
