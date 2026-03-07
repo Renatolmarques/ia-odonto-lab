@@ -1,91 +1,165 @@
-# Aqui fica a personalidade do Agent com RAG (Retrieval-Augmented Generation).
+# app/agents/clinical_agent.py
+"""
+IA Odonto Lab — Lina Clinical Agent
 
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage
+Lina is a silent AI listener. She analyzes patient WhatsApp conversations
+and returns a structured clinical summary for the CRM.
+
+She does NOT respond to patients. She only reads, thinks, and documents.
+
+Pipeline:
+  1. RAG: retrieve relevant context from the clinic knowledge base (pgvector)
+  2. Build system prompt with clinical guardrails + RAG context
+  3. Invoke GPT-4o-mini with structured output (Pydantic ResumoClinico)
+  4. Return typed model ready for EspoCRM upsert
+
+LGPD compliance: pgvector contains ONLY institutional knowledge.
+                 Patient data never enters the vector database.
+"""
+import logging
+from typing import Optional
+
 from dotenv import load_dotenv
-import os
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+
+from app.schemas import ResumoClinico
 from app.tools.retriever_tool import buscar_contexto
 
-# Carrega a OPENAI_API_KEY do nosso cofre .env
 load_dotenv()
+logger = logging.getLogger(__name__)
 
-def _construir_prompt_com_rag(contexto_recuperado: list[dict]) -> str:
-    """
-    Constrói um bloco de contexto a ser inserido no System Prompt
-    baseado nos resultados do retriever.
-    """
-    if not contexto_recuperado:
+MODEL_NAME = "gpt-4o-mini"
+TEMPERATURE_STRUCTURED = 0.1  # Low temperature for consistent structured output
+TEMPERATURE_CHAT = 0.3  # Slightly higher for empathetic patient-facing responses
+
+
+def _build_rag_block(retrieved_context: list[dict]) -> str:
+    """Formats RAG results as a context block for the system prompt."""
+    if not retrieved_context:
         return ""
-
-    contexto_texto = "\n".join([
-        f"- {doc['texto']}"
-        for doc in contexto_recuperado
-    ])
-
-    return f"""
-    CONTEXTO DA BASE DE CONHECIMENTO (obtido automaticamente):
-    {contexto_texto}
-
-    Use este contexto para responder com precisão. Se o contexto for relevante, use-o.
-    """
-
-def testar_agente_langchain(mensagem_paciente: str):
-    """
-    Função para testar a comunicação da LangChain com a OpenAI
-    usando a identidade da Lina e o modelo gpt-4o-mini.
-
-    Agora enriquecida com RAG (Retrieval-Augmented Generation).
-    """
-    print("\n[SISTEMA] Iniciando a personalidade da Lina...")
-
-    # STEP 1: Recupera contexto relevante da base de conhecimento
-    print("[SISTEMA] Consultando base de conhecimento...")
-    contexto_recuperado = buscar_contexto(mensagem_paciente, k=3)
-
-    # Inicializa a IA
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.3 # Um pouco de criatividade para ser empática, mas sem alucinar
+    lines = "\n".join(
+        f"  - [{round(doc['relevancia'] * 100)}% relevant] {doc['texto']}"
+        for doc in retrieved_context
     )
+    return f"""
+CLINIC KNOWLEDGE BASE CONTEXT (retrieved automatically via RAG):
+{lines}
 
-    # O System Prompt: A Alma e as Regras de Comportamento
-    prompt_sistema = """
-    IDENTIDADE E OBJETIVO
-    Você é a Lina, a assistente virtual inteligente de uma clínica odontológica de excelência.
-    Seu tom de voz é: Acolhedor, Profissional e Empático. Você transmite autoridade técnica, mas com o carinho de quem entende que o paciente pode ter medo de dentista.
-    Seu objetivo principal: Tirar dúvidas básicas e CONVERTER a conversa em um AGENDAMENTO DE AVALIAÇÃO.
+Use this context to estimate the 'potencial' field based on real service prices.
+"""
 
-    REGRAS DE OURO (GUARDRAILS)
-    1. NUNCA invente informações. Se não souber, diga: "Por favor verificar este ponto com a Doutora."
-    2. NUNCA dê diagnósticos médicos. (Ex: "Isso parece ser uma cárie"). Diga apenas que "A Doutora precisa avaliar clinicamente".
-    3. BLOQUEIO DE ASSUNTO: Você é uma especialista em Odontologia. Se perguntarem sobre política, receitas ou fora do contexto, responda: "Desculpe, sou a assistente da clínica e só consigo ajudar com o seu sorriso."
-    4. MENSAGENS CURTAS: Não envie textos longos. Use emojis moderadamente (🦷, ✨, 📅). Responda de forma breve, ideal para o WhatsApp.
 
-    SCRIPT DE VENDAS (COMO AGIR)
-    Sempre termine suas respostas com uma PERGUNTA para incentivar o agendamento.
-    - CASO 1 (Preço): "Entendo que o valor é importante. Como cada caso é único, a Dra. precisa examinar você para passar um valor exato. Vamos agendar uma avaliação para tirar essa dúvida?"
-    - CASO 2 (Agendar): Pergunte o Nome Completo. Depois, pergunte o melhor dia/período. Confirme e diga que a secretária humana validará o horário.
-    - CASO 3 (Medo/Dúvida): Use empatia. "Fique tranquilo(a). Nossa equipe tem atendimento humanizado e a Dra. tem a mão super leve. Vamos marcar uma avaliação para você conversar com ela?"
-    """ + _construir_prompt_com_rag(contexto_recuperado)
+async def processar_conversa(
+    mensagem: str,
+    phone: str,
+    patient_name: Optional[str] = None,
+) -> ResumoClinico:
+    """
+    Analyzes a patient conversation and returns a structured clinical summary.
 
-    # Define a 'Personalidade' e junta com a mensagem do usuário
-    mensagens = [
-        SystemMessage(content=prompt_sistema),
-        HumanMessage(content=mensagem_paciente)
+    Args:
+        mensagem:     Concatenated message text or audio transcription.
+        phone:        Patient phone number (last 4 digits used in logs only).
+        patient_name: Name from CRM if already known.
+
+    Returns:
+        ResumoClinico: Validated Pydantic model ready for EspoCRM upsert.
+    """
+    logger.info("🧠 Clinical analysis started | phone: ...%s", phone[-4:])
+
+    # Step 1: Retrieve relevant context from knowledge base
+    retrieved_context = buscar_contexto(mensagem, k=3)
+    logger.info("📚 %d RAG result(s) retrieved", len(retrieved_context))
+
+    name_hint = f"The patient's name may be '{patient_name}'." if patient_name else ""
+
+    system_prompt = f"""
+IDENTITY
+You are Lina, a clinical intelligence analyst for a dental clinic.
+Your role is to analyze patient conversations and extract structured data for the CRM.
+You do NOT respond to patients — you only analyze and document.
+
+{name_hint}
+
+GUARDRAILS
+1. NEVER invent data. Use default values if information cannot be extracted.
+2. NEVER make medical diagnoses.
+3. NEVER include CPF, ID numbers, or passwords in the output.
+4. 'potencial': use prices from the RAG context below. If unavailable, use 0.0.
+5. 'intencao': classify as Inquiry | Scheduling | Complaint | Other.
+6. 'ltv_pago': only fill if the patient explicitly mentioned past payments.
+7. 'fobias_alergias': capture any mention of fear, phobia, or allergy.
+
+{_build_rag_block(retrieved_context)}
+
+RETURN ONLY THE STRUCTURED JSON. No text outside the JSON.
+"""
+
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=f"Analyze this conversation:\n\n{mensagem}"),
     ]
 
-    print(f"[PACIENTE]: '{mensagem_paciente}'\n")
+    llm = ChatOpenAI(
+        model=MODEL_NAME, temperature=TEMPERATURE_STRUCTURED, max_tokens=1500
+    )
+    resumo: ResumoClinico = llm.with_structured_output(ResumoClinico).invoke(messages)
 
-    # STEP 2: Bate na porta da OpenAI com contexto enriquecido
-    resposta = llm.invoke(mensagens)
+    logger.info(
+        "✅ Intent: %s | Estimated potential: R$ %.2f",
+        resumo.intencao,
+        resumo.potencial,
+    )
+    return resumo
 
-    print("=== RESPOSTA DA LINA ===")
-    print(resposta.content)
-    print("========================\n")
 
-    return resposta.content
+def testar_agente_langchain(mensagem_paciente: str) -> str:
+    """
+    Legacy test function — returns free-text response for manual testing.
+    Used by test_rag_integration.py (Sprint 3 compatibility).
+
+    For production use, call processar_conversa() instead.
+    """
+    print("\n[SYSTEM] Initializing Lina agent...")
+    retrieved_context = buscar_contexto(mensagem_paciente, k=3)
+
+    llm = ChatOpenAI(model=MODEL_NAME, temperature=TEMPERATURE_CHAT)
+
+    system_prompt = """
+    IDENTITY
+    You are Lina, the AI assistant for a dental clinic.
+    Tone: Warm, professional, empathetic.
+    Goal: Answer basic questions and guide the patient toward booking an evaluation.
+
+    GUARDRAILS
+    1. NEVER invent information. If unsure: "Please verify this with the doctor."
+    2. NEVER give medical diagnoses. Say: "The doctor needs to evaluate this clinically."
+    3. Off-topic questions: "I'm the clinic assistant — I can only help with dental matters."
+    4. Keep messages short and WhatsApp-friendly. Use emojis sparingly (🦷, ✨, 📅).
+
+    SALES APPROACH
+    - Price questions: explain that exact pricing requires an evaluation. Invite to schedule.
+    - Scheduling: ask for full name, then preferred day/time.
+    - Fear/anxiety: show empathy, offer humanized care with the dentist.
+    """ + _build_rag_block(
+        retrieved_context
+    )
+
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=mensagem_paciente),
+    ]
+
+    print(f"[PATIENT]: '{mensagem_paciente}'\n")
+    response = llm.invoke(messages)
+    print("=== LINA RESPONSE ===")
+    print(response.content)
+    print("====================\n")
+    return response.content
+
 
 if __name__ == "__main__":
-    # Teste manual simulando um paciente com medo perguntando de implante
-    teste_msg = "Oi, eu morro de medo de dentista, mas acho que preciso colocar um implante. Quanto custa mais ou menos?"
-    testar_agente_langchain(teste_msg)
+    testar_agente_langchain(
+        "Hi, I'm terrified of dentists but I think I need an implant. How much does it cost?"
+    )

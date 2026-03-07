@@ -1,125 +1,78 @@
+# app/tools/retriever_tool.py
 """
-Skill de Busca - Retriever Tool para RAG (Retrieval-Augmented Generation)
+IA Odonto Lab — RAG Retriever Tool
 
-Esta ferramenta conecta ao banco vetorial PGVector e recupera trechos da base
-de conhecimento clínica que são semanticamente similares à pergunta do usuário.
+Performs similarity search against the clinic knowledge base stored in pgvector.
+Automatically detects whether running inside Docker or locally and adjusts
+the connection string accordingly — no manual configuration switch needed.
+
+LGPD: This tool queries ONLY institutional knowledge (FAQs, services, pricing).
+      Patient data never enters the vector database.
 """
+import logging
+import os
+import socket
 
 from dotenv import load_dotenv
 from langchain_openai import OpenAIEmbeddings
 from langchain_postgres import PGVector
 
-
-# ==========================================
-# CONFIGURAÇÕES
-# ==========================================
-
-# Carrega variáveis de ambiente
 load_dotenv()
+logger = logging.getLogger(__name__)
 
-# Parâmetros de conexão ao Postgres com pgvector
-CONNECTION_STRING = "postgresql+psycopg://postgres:postgres@localhost:5433/ia_odonto"
 COLLECTION_NAME = "clinica_docs"
 EMBEDDING_MODEL = "text-embedding-3-small"
 
 
-# ==========================================
-# INICIALIZAÇÃO
-# ==========================================
-
-def _inicializar_pgvector():
-    """Inicializa a conexão com o PGVector."""
-    embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL)
-
-    vectorstore = PGVector(
-        embeddings=embeddings,
-        collection_name=COLLECTION_NAME,
-        connection=CONNECTION_STRING,
-    )
-
-    return vectorstore
+def _is_running_in_docker() -> bool:
+    """Detects Docker environment by resolving the 'db' service hostname."""
+    try:
+        socket.gethostbyname("db")
+        return True
+    except socket.gaierror:
+        return False
 
 
-# ==========================================
-# FUNÇÃO PRINCIPAL DE BUSCA
-# ==========================================
+def _get_connection_string() -> str:
+    """Builds the correct connection string for the current environment."""
+    user = os.getenv("DB_USER", "postgres")
+    password = os.getenv("DB_PASSWORD", "postgres")
+    name = os.getenv("DB_NAME", "ia_odonto")
+    if _is_running_in_docker():
+        host, port = os.getenv("DB_HOST", "db"), os.getenv("DB_PORT", "5432")
+    else:
+        host, port = os.getenv("DB_HOST_LOCAL", "localhost"), os.getenv(
+            "DB_PORT_LOCAL", "5433"
+        )
+    return f"postgresql+psycopg://{user}:{password}@{host}:{port}/{name}"
+
 
 def buscar_contexto(pergunta: str, k: int = 3) -> list[dict]:
     """
-    Busca no banco vetorial os k trechos mais similares à pergunta.
+    Retrieves the k most relevant knowledge base chunks for a given query.
 
     Args:
-        pergunta (str): A pergunta ou query do usuário
-        k (int): Número de resultados a retornar (padrão: 3)
+        pergunta: Patient message or query text.
+        k: Number of results to return (default: 3).
 
     Returns:
-        list[dict]: Lista com os trechos encontrados e suas distâncias.
-                   Exemplo:
-                   [
-                       {
-                           "texto": "A clínica funciona de segunda a sexta das 8h às 18h...",
-                           "relevancia": 0.95
-                       },
-                       ...
-                   ]
+        List of dicts with 'texto' (content) and 'relevancia' (0.0–1.0 score).
+        Returns empty list on any error — never propagates exceptions to the agent.
     """
-    print(f"\n[BUSCA] Consultando base de conhecimento com pergunta: '{pergunta}'")
-
+    logger.info("RAG query: %s", pergunta[:80])
     try:
-        # Inicializa o PGVector
-        vectorstore = _inicializar_pgvector()
-
-        # Busca os k documentos mais similares com similarity score
-        resultados = vectorstore.similarity_search_with_score(pergunta, k=k)
-
-        # Formata os resultados
-        contexto = []
-        for doc, score in resultados:
-            contexto.append({
-                "texto": doc.page_content,
-                "relevancia": round(1 - score, 2)  # Converte distância em relevância (0-1)
-            })
-
-        print(f"[BUSCA] {len(contexto)} resultado(s) encontrado(s).\n")
-
-        return contexto
-
-    except Exception as e:
-        print(f"[ERRO] Falha ao buscar no banco vetorial: {str(e)}")
+        vectorstore = PGVector(
+            embeddings=OpenAIEmbeddings(model=EMBEDDING_MODEL),
+            collection_name=COLLECTION_NAME,
+            connection=_get_connection_string(),
+        )
+        results = vectorstore.similarity_search_with_score(pergunta, k=k)
+        context = [
+            {"texto": doc.page_content, "relevancia": round(1 - score, 2)}
+            for doc, score in results
+        ]
+        logger.info("📚 RAG returned %d result(s)", len(context))
+        return context
+    except Exception as exc:
+        logger.error("RAG query failed: %s", str(exc))
         return []
-
-
-# ==========================================
-# TESTE DE VALIDAÇÃO
-# ==========================================
-
-def test_retriever():
-    """
-    Testa a ferramenta de busca com uma pergunta real sobre horários.
-    """
-    print("\n" + "="*60)
-    print("TESTE DO RETRIEVER TOOL")
-    print("="*60)
-
-    pergunta_teste = "Quais os horários de atendimento no sábado?"
-
-    resultados = buscar_contexto(pergunta_teste, k=3)
-
-    if resultados:
-        print(f"✓ Pergunta: '{pergunta_teste}'\n")
-        for i, resultado in enumerate(resultados, 1):
-            print(f"Resultado {i} (Relevância: {resultado['relevancia']})")
-            print(f"Texto: {resultado['texto'][:150]}...")
-            print()
-    else:
-        print(f"✗ Nenhum resultado encontrado para: '{pergunta_teste}'")
-        print("  Verifique se:")
-        print("  1. O Postgres está rodando na porta 5433")
-        print("  2. Os dados foram ingeridos (rode ingest_knowledge.py)")
-        print("  3. A OPENAI_API_KEY está correta no .env")
-
-    print("="*60 + "\n")
-
-
-if __name__ == "__main__":
-    test_retriever()

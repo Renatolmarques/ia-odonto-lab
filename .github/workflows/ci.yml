@@ -1,0 +1,72 @@
+# .github/workflows/ci.yml
+# IA Odonto Lab — Continuous Integration Pipeline
+#
+# Triggered on every push and pull request to main.
+# Steps: install → lint (black + flake8) → test (pytest) → docker build
+#
+# Badge: [![CI](https://github.com/Renatolmarques/ia-odonto-lab/actions/workflows/ci.yml/badge.svg)]
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      # Spins up a real PostgreSQL with pgvector for integration tests
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ia_odonto
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      DB_HOST_LOCAL: localhost
+      DB_PORT_LOCAL: "5433"
+      DB_NAME: ia_odonto
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      ESPO_URL: ""
+      ESPO_API_KEY: ""
+      APP_ENV: test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint — black (formatting check)
+        run: black --check .
+
+      - name: Lint — flake8 (style check)
+        run: flake8 . --max-line-length=120 --exclude=.venv,__pycache__
+
+      - name: Test — pytest
+        run: pytest tests/ -v --tb=short
+
+      - name: Build Docker image
+        run: docker build -t ia-odonto-lab:ci .
