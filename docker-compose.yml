@@ -11,6 +11,9 @@ services:
     depends_on:
       - db
     restart: unless-stopped
+    networks:
+      - default
+      - stack-ia_default
 
   db:
     image: pgvector/pgvector:pg16
@@ -27,3 +30,9 @@ services:
 
 volumes:
   pgdata:
+
+networks:
+  default:
+    driver: bridge
+  stack-ia_default:
+    external: true
