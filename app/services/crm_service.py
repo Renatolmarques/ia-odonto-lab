@@ -82,7 +82,7 @@ async def _create_contact(phone: str, resumo: ResumoClinico) -> Dict[str, Any]:
         "firstName": parts[0],
         "lastName": " ".join(parts[1:]) if len(parts) > 1 else ".",
         "phoneNumber": phone,
-        "cStatusAtendimento": "New Lead",
+        "cStatusAtendimento": "Novo Lead",
         "cAisummary": resumo.formatar_para_crm(),
         "cPotencialVenda": resumo.potencial,
         "cPotencialVendaCurrency": "BRL",
