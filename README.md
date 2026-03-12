@@ -13,13 +13,13 @@
 
 ## The Problem
 
-Dental clinics lose revenue and patient relationships because conversation history lives in WhatsApp and never makes it into the CRM in a structured way. Receptionists forget details. Leads go cold. High-ticket aesthetic treatments: patients attempt to book appointments without success because messages go unseen. Fears and allergies mentioned months ago remain invisible at the next visit.
+Dental clinics lose revenue and patient relationships because conversation history lives in WhatsApp and never reaches the CRM in a structured way. Receptionists forget critical details. Leads go cold. High-ticket aesthetic treatments (whitening, veneers, implants) are missed because patients express interest casually in chat and never get followed up. Concerns about price, allergies and fears mentioned months ago remain invisible at the next visit, weakening trust and conversion.
 
 ## The Solution
 
-**Lina** — a silent AI listener that monitors incoming WhatsApp conversations, extracts structured clinical intelligence, and writes it directly into the CRM. No manual data entry. No information lost.
+**Lina** — Is a silent AI listener agent built to increase clinic revenue by ensuring no patient opportunity ever goes unnoticed. Running 24/7 on a private cloud server (meaning it operates independently without needing anyone's computer to be on).
 
-Lina never sends messages to patients. She only listens, thinks, and documents.
+Lina listens to every WhatsApp Business conversation and writes structured intelligence directly into the CRM with zero manual input. Every new lead is automatically registered with LTV, interaction history, and conversion potential. A PostgreSQL database stores per-patient profiles with full summaries of each interaction, including flagged mentions of allergies, needle anxiety, and payment concerns. The RAG pipeline gives Lina long-term memory by retrieving past patient context before generating any recommendation in the CRM, making her sharper with every conversation. When a patient signals interest in any procedure, Lina alerts the dentist before the lead goes cold. It also tracks patients who have not returned for routine cleanings in months, flagging them as re-engagement opportunities and reminding the dentist to reconnect — often the ideal moment to revisit a previously mentioned aesthetic treatment they once showed interest in.
 
 ---
 
