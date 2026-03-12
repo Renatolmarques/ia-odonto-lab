@@ -1,13 +1,18 @@
 # IA Odonto Lab
 
-> An AI-powered CRM intelligence layer for dental clinics, built with production-grade Python engineering and a modern data stack.
+> An AI-powered CRM intelligence layer for dental clinics, built with modern data engineering stack.
 
 [![CI](https://github.com/Renatolmarques/ia-odonto-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/Renatolmarques/ia-odonto-lab/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi)
-![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)
-![LangChain](https://img.shields.io/badge/LangChain-0.3-1C3C3C)
+![Python](https://img.shields.io/badge/Python-3.12-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.111-green)
+![LangChain](https://img.shields.io/badge/LangChain-0.3-orange)
+![Docker](https://img.shields.io/badge/Docker-Compose-blue)
 ![pgvector](https://img.shields.io/badge/pgvector-PostgreSQL-336791?logo=postgresql)
+
+<!-- In progress — Sprint 5B onwards -->
+![dbt](https://img.shields.io/badge/dbt-Silver%20Layer-FF694B?logo=dbt)
+![Databricks](https://img.shields.io/badge/Databricks-Delta%20Lake-FF3621?logo=databricks)
+![Snowflake](https://img.shields.io/badge/Snowflake-Gold%20Layer-29B5E8?logo=snowflake)
 
 ---
 
@@ -15,38 +20,54 @@
 
 Dental clinics lose revenue and patient relationships because conversation history lives in WhatsApp and never reaches the CRM in a structured way. Receptionists forget critical details. Leads go cold. High-ticket aesthetic treatments (whitening, veneers, implants) are missed because patients express interest casually in chat and never get followed up. Concerns about price, allergies and fears mentioned months ago remain invisible at the next visit, weakening trust and conversion.
 
+The bottleneck is not intention. It is memory.
+
 ## The Solution
 
-**Lina** — Is a silent AI listener agent built to increase clinic revenue by ensuring no patient opportunity ever goes unnoticed. Running 24/7 on a private cloud server (meaning it operates independently without needing anyone's computer to be on).
+Lina is a silent AI agent that listens to every WhatsApp Business conversation and writes valuable structured patient's summary directly into the CRM — automatically, with no manual input.
 
-Lina listens to every WhatsApp Business conversation and writes structured intelligence directly into the CRM with zero manual input. Every new lead is automatically registered with LTV, interaction history, and conversion potential. A PostgreSQL database stores per-patient profiles with full summaries of each interaction, including flagged mentions of allergies, needle anxiety, and payment concerns. The RAG pipeline gives Lina long-term memory by retrieving past patient context before generating any recommendation in the CRM, making her sharper with every conversation. When a patient signals interest in any procedure, Lina alerts the dentist before the lead goes cold. It also tracks patients who have not returned for routine cleanings in months, flagging them as re-engagement opportunities and reminding the dentist to reconnect — often the ideal moment to revisit a previously mentioned aesthetic treatment they once showed interest in.
+What Lina does:
 
----
+ - Registers every new lead with LTV estimate and conversion potential
+ - Highlights in CRM: client's potential for high-ticket upsell, payment impediments, and needle phobia/allergies
+ - Enriches the CRM with intent classification and visit history
+ - Runs 24/7 on a private VPS — no laptop or manual work required
+
+What makes Lina different from a simple webhook:
+She uses RAG (Retrieval-Augmented Generation) to consult the clinic's knowledge base before generating any AI summary, and structured Pydantic output to guarantee the CRM always receives valid and typed data, with no regex and hallucinated fields.
+A PostgreSQL database stores per-patient profiles with full summaries of each interaction
+
 
 ## Architecture
 
 ```
-WhatsApp → Evolution API → Chatwoot → n8n
-                                        ↓
-                           POST /webhook/n8n_handoff
-                                        ↓
-                              FastAPI (Docker)
-                                        ↓
-                    ┌───────────────────────────────┐
-                    │         Lina Agent            │
-                    │   LangChain + GPT-4o-mini     │
-                    │   RAG via pgvector            │
-                    │   Pydantic structured output  │
-                    └───────────────────────────────┘
-                                        ↓
-                           EspoCRM REST API (Upsert)
-                                        ↓
-                    ┌───────────────────────────────┐
-                    │      Medallion Data Lake      │
-                    │  Bronze → Silver → Gold       │
-                    │  PySpark + Databricks         │
-                    │  Snowflake Star Schema        │
-                    └───────────────────────────────┘
+WhatsApp Message
+      ↓
+Evolution API (WhatsApp gateway)
+      ↓
+n8n Workflow Orchestration
+      ↓
+POST /webhook/n8n_handoff
+(all services run on a private cloud VPS — no local machine required)
+      ↓
+FastAPI — ia-odonto-api (Docker, port 8000)
+      ↓
+┌─────────────────────────────────────────┐
+│             Lina Agent                  │
+│  LangChain 0.3 + GPT-4o-mini           │
+│  RAG via pgvector (clinica_docs)        │
+│  Pydantic structured output             │
+│  patient_name context injection         │
+└─────────────────────────────────────────┘
+      ↓
+CRM REST API (upsert contact + fields)
+      ↓
+┌─────────────────────────────────────────┐
+│       Medallion Data Lake               │
+│  Bronze  →  Silver  →  Gold            │
+│  Parquet    dbt + Delta Lake  Snowflake │
+│  (VPS)      (Databricks)     Star Schema│
+└─────────────────────────────────────────┘
 ```
 
 ---
@@ -57,13 +78,17 @@ WhatsApp → Evolution API → Chatwoot → n8n
 |-------|-----------|-----|
 | API | FastAPI + Pydantic v2 | Async, type-safe, auto-documented |
 | AI Agent | LangChain 0.3 + GPT-4o-mini | Structured output with `with_structured_output()` |
-| Vector DB | pgvector (PostgreSQL 16) | RAG with cosine similarity — LGPD compliant |
+| Vector DB | pgvector (PostgreSQL 16) | RAG with cosine similarity, HNSW index |
 | Embeddings | OpenAI text-embedding-3-small | Cost-efficient, high quality |
 | CRM | EspoCRM REST API | Upsert contacts with AI-generated clinical summaries |
-| Containerization | Docker + Compose | Multi-stage build, non-root user |
+| Orchestration | n8n (self-hosted) | Visual workflow: buffer → GPT → CRM → Lina |
+| Reverse Proxy | Nginx Proxy Manager | HTTPS termination, domain routing |
+| Infrastructure | VPS + Docker Compose | Cloud-hosted, production-grade, zero downtime |
 | CI/CD | GitHub Actions | Lint → Test → Docker build on every push |
-| Big Data | PySpark + Databricks | Medallion Architecture (Bronze/Silver/Gold) |
+| Bronze Layer | Parquet (partitioned by date) | Columnar, compressed, market standard |
+| Silver Layer | dbt + Delta Lake (Databricks) | SQL models versioned in Git, ACID, time travel |
 | Data Warehouse | Snowflake | Star Schema for business analytics |
+| BI Dashboard | Metabase (self-hosted) | Free, simple for non-technical users |
 | Testing | pytest + pytest-asyncio | 18 tests, async coverage |
 
 ---
@@ -73,16 +98,28 @@ WhatsApp → Evolution API → Chatwoot → n8n
 **Structured output over prompt engineering**
 Rather than parsing free-text LLM responses, Lina uses `llm.with_structured_output(ResumoClinico)` — a Pydantic model that guarantees the CRM always receives valid, typed data. No regex. No hallucinated fields.
 
-**LGPD-compliant RAG**
-The vector database contains only institutional knowledge (clinic FAQs, services, pricing policy). Patient data never enters pgvector. PII masking happens at the Silver layer via PySpark UDFs before any persistence.
+**n8n webhook routing — one entry point, two independent workflows**
+Evolution API supports only one webhook URL per instance. Rather than merging two unrelated workflows into one, we built a lightweight router workflow that receives every WhatsApp event and forwards it in parallel, keeping each workflow focused on a single responsibility.
 
-**Automatic environment detection**
-`retriever_tool.py` detects whether it is running inside Docker (connects to `db:5432`) or locally (connects to `localhost:5433`) without any manual configuration switch.
+**Two AI layers, complementary not competing**
+n8n runs GPT-4o-mini for fast conversation summarization (nota_timeline, cAisummary text). Lina runs in parallel for semantic enrichment (cPotencialVenda, cQtdConsultas, intent classification). Neither overwrites the other.
+
+**dbt for Silver layer — SQL as code**
+Instead of a raw `silver_transform.py`, transformations are dbt SQL models versioned in Git. Each model has automated tests (`not_null`, `accepted_values`) and auto-generated documentation. This is the same tooling applicable to any SQL-heavy data project — a deliberate, transferable choice.
+
+**Delta Lake for portfolio, Parquet for production (small Clinic)**
+The VPS runs Parquet (lightweight, no Spark dependency). Databricks runs Delta Lake (ACID, time travel, schema enforcement) — demonstrating the same pipeline at both scales.
+
+**LGPD-compliant RAG**
+The vector database contains only institutional knowledge (clinic FAQs, services, pricing). Patient's confidencial never enters pgvector. PII masking (SHA-256) happens at the Silver layer before any persistence.
 
 **CRM responsibility boundaries**
-Lina writes: `cAisummary`, `cPotencialVenda`, `cQtdConsultas`.
-The existing n8n workflow writes: `cLifetimeValue`, `cCKanbanCard` (calculated from the billing database).
-Neither overwrites the other — clean separation of concerns across two independent systems.
+Lina writes: `cAisummary`, `cPotencialVenda`, `cQtdConsultas`, `cDisplayPotencial`.
+n8n writes: `cLifetimeValue`, `cCKanbanCard`, `cCUltimoRecebimento`, `cDisplayLTV`.
+Clean separation — neither system overwrites the other.
+
+**Production-grade webhook routing**
+All external webhooks are served over HTTPS via a dedicated domain with DNS and reverse proxy configuration. The domain has no public-facing pages; it exists solely to give the internal services a stable, secure entry point accessible from the internet.
 
 ---
 
@@ -91,21 +128,33 @@ Neither overwrites the other — clean separation of concerns across two indepen
 ```
 ia-odonto-lab/
 ├── app/
-│   ├── main.py                    # FastAPI orchestration
-│   ├── schemas.py                 # Pydantic models (WebhookPayload, ResumoClinico)
-│   ├── agents/clinical_agent.py   # Lina: LangChain + RAG + structured output
-│   ├── services/crm_service.py    # EspoCRM REST API integration
-│   ├── tools/retriever_tool.py    # pgvector similarity search
-│   ├── tools/ingest_knowledge.py  # Knowledge base ingestion pipeline
-│   └── context/clinica_knowledge.md
+│   ├── main.py                      # FastAPI orchestration + /webhook/n8n_handoff
+│   ├── schemas.py                   # Pydantic models (WebhookPayload, ResumoClinico)
+│   ├── agents/
+│   │   └── clinical_agent.py        # Lina: LangChain + RAG + structured output
+│   ├── services/
+│   │   └── crm_service.py           # CRM REST API integration
+│   ├── tools/
+│   │   ├── retriever_tool.py        # pgvector HNSW similarity search
+│   │   ├── ingest_knowledge.py      # Knowledge base ingestion pipeline
+│   │   └── db_client.py             # PostgreSQL connection management
+│   └── context/
+│       └── clinica_knowledge.md     # Clinic knowledge base (RAG source)
 ├── data_lake/
-│   ├── bronze/export_bronze.py    # Raw data extraction → Parquet
-│   ├── silver/silver_transform.py # PySpark + LGPD masking + feature engineering
-│   └── gold/gold_schema.sql       # Snowflake Star Schema DDL
-├── tests/                         # 18 tests — webhook, RAG, Pydantic rules
-├── .github/workflows/ci.yml       # GitHub Actions: lint → test → docker build
-├── Dockerfile                     # Multi-stage build (builder + runner)
-└── docker-compose.yml             # FastAPI + PostgreSQL 16 + pgvector
+│   ├── bronze/
+│   │   └── export_bronze.py         # MariaDB + PostgreSQL → Parquet (partitioned by date)
+│   ├── silver/
+│   │   ├── models/                  # dbt SQL models (stg_contacts, recebimentos_limpos)
+│   │   ├── silver_transform.py      # PySpark + LGPD masking + feature engineering
+│   │   └── databricks_notebook.ipynb
+│   └── gold/
+│       └── gold_schema.sql          # Snowflake Star Schema DDL
+├── tests/                           # 18 tests — webhook, RAG, Pydantic rules
+├── docs/
+│   └── sprint_notes.md              # Engineering decisions log per sprint
+├── .github/workflows/ci.yml         # GitHub Actions: lint → test → docker build
+├── Dockerfile                       # Multi-stage build (builder + runner)
+└── docker-compose.yml               # FastAPI + PostgreSQL 16 + pgvector
 ```
 
 ---
@@ -113,103 +162,132 @@ ia-odonto-lab/
 ## Data Pipeline — Medallion Architecture
 
 ```
-MariaDB (billing)     PostgreSQL (interactions)
-        ↓                       ↓
-    Bronze Layer          Bronze Layer
-  (Parquet, raw)        (Parquet, raw)
-        ↓                       ↓
-        └──────────┬────────────┘
-                   ↓
-            Silver Layer
-        PySpark on Databricks
-        LGPD: PII masking (SHA-256)
-        Features: LTV, visit frequency,
-                  days since last visit
-                   ↓
-             Gold Layer
-          Snowflake Star Schema
-          FACT_INTERACTIONS
-          DIM_PATIENTS (anonymized)
-          DIM_SERVICES
-
+WhatsApp Conversations        MariaDB (CRM billing)
+         ↓                             ↓
+    Bronze Layer                 Bronze Layer
+  Parquet, partitioned         Parquet, partitioned
+  /bronze/interactions/        /bronze/c_recebimento/
+  dt=YYYY-MM-DD/               dt=YYYY-MM-DD/
+         ↓                             ↓
+         └──────────┬──────────────────┘
+                    ↓
+             Silver Layer
+         dbt models (SQL versioned in Git)
+         PySpark on Databricks Community
+         LGPD: SHA-256 PII masking
+         Features:
+           ltv_acumulado
+           frequencia_visitas
+           dias_desde_ultima_visita
+         Delta Lake: ACID + time travel
+                    ↓
+              Gold Layer
+           Snowflake Star Schema
+           FACT_INTERACTIONS
+           DIM_PATIENTS (anonymized)
+           DIM_SERVICES / DIM_DATE
+                    ↓
+             Metabase Dashboard
+           LTV by period · Conversion by intent
+           Re-engagement opportunities
 ```
 
 ---
 
-## Running Locally
+## Quickstart
 
 **Prerequisites:** Docker, Python 3.12, OpenAI API key
 
 ```bash
-# Clone and configure
 git clone https://github.com/Renatolmarques/ia-odonto-lab.git
-cd ia-odonto-lab
-cp .env.example .env
+cd ia-odonto-lab && cp .env.example .env
 # Add your OPENAI_API_KEY to .env
-
-# Create virtual environment
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt -r requirements-dev.txt
-
-# Start services
 docker-compose up -d
-
-# Initialize vector database
 python init_db.py
 python app/tools/ingest_knowledge.py
+```
 
-# Run tests
-pytest tests/ -v
-
-# Test the full pipeline
+**Verify:**
+```bash
 curl http://localhost:8000/health
+# → {"status":"ok","version":"0.4.0"}
+
 curl -X POST http://localhost:8000/webhook/n8n_handoff \
   -H "Content-Type: application/json" \
-  -d '{"phone":"+5511999999999","patient_name":"Test Patient","message_text":"I need a dental implant but I am afraid of needles. How much does it cost?"}'
+  -d '{"phone":"+5511999999999","patient_name":"Test Patient","message_text":"I need an implant but I am afraid of needles. How much does it cost?"}'
+```
+
+**Run tests:**
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
+pytest tests/ -v
 ```
 
 ---
 
-## What Lina Produces
-
-Every conversation is analyzed and written to the CRM in this format:
+## What Lina Writes to the CRM
 
 ```
-Clinical AI Summary:
-Patient name. Known allergies. Fears/phobias. Chronological history.
+Every conversation produces two outputs: a structured clinical profile that captures what matters about the patient — known allergies, fears, procedures of interest, budget signals — updated automatically as new information emerges across conversations. The second output is a dated note attached to the contact record summarizing what was discussed. 
+Both are written with no manual input.
 
-Technical Note:
-- Client:       [Full name]
-- Intent:       [Inquiry | Scheduling | Complaint | Other]
-- Request:      [What the patient wants]
-- Notes:        [Fears, objections, timeline]
-- Potential:    R$ [estimated by Lina based on RAG context]
-- Visits:       [identified in conversation]
+**Cumulative AI Profile (example):**
+"Renato Marques. Allergic to domperidone. Fear of needles.
+Interested in teeth whitening (budget around R$ 1,000).
+Most recent contact: asked about cleaning price and clinic address."
+
+**Per-conversation note (example):**
+"Client: Renato Marques — Intent: Scheduling
+Request: Cleaning price and clinic address
+Notes: Known allergy to domperidone, needle anxiety on record."
 ```
 
 ---
 
 ## Roadmap
 
-- [x] Sprint 1 — CRM integration + n8n webhook pipeline
-- [x] Sprint 2 — FastAPI + Docker + multi-stage build
-- [x] Sprint 3 — LangChain agent + RAG with pgvector
-- [x] Sprint 4 — Structured output + EspoCRM upsert + CI/CD + 18 tests
-- [ ] Sprint 5 — PySpark Bronze/Silver + Databricks Delta Lake
-- [ ] Sprint 6 — Snowflake Gold layer
+| Sprint | Status | Description |
+|--------|--------|-------------|
+| 1 | ✅ | CRM integration + n8n webhook pipeline |
+| 2 | ✅ | FastAPI + Docker + multi-stage build |
+| 3 | ✅ | LangChain agent + RAG with pgvector |
+| 4 | ✅ | Structured output + CRM upsert + CI/CD + 18 tests |
+| 5A | ✅ | VPS deploy + n8n routing fix + patient_name handoff |
+| 5B | 🔄 | Bronze Layer — Parquet export + daily cron job |
+| 5C | ⬜ | Silver Layer — dbt models + Delta Lake on Databricks |
+| 6 | ⬜ | Gold Layer — Snowflake Star Schema + Metabase dashboard |
+| 7 | ⬜ | Episodic Memory — pgvector patient_history collection |
+| 8 | ⬜ | Security — UFW, Fail2ban, SSH keys, API auth |
+| 9 | ⬜ | Fine-tuning showcase — synthetic JSONL + gpt-4o-mini |
 
 ---
 
 ## LGPD Compliance
 
-This project is designed with Brazilian data privacy law (LGPD) in mind:
-
-- The vector database contains **zero patient data** — only institutional knowledge
-- Patient PII is masked at the Silver layer (SHA-256 hashing, CPF redaction)
-- The AI agent operates on conversation text delivered by the orchestration layer — it never queries patient databases directly
-- Audit trails are maintained for all CRM write operations
+- Vector database contains **zero patient data** — only institutional knowledge
+- Patient PII masked at Silver layer via SHA-256 hashing before any persistence
+- Lina operates on conversation text delivered by n8n — never queries patient databases directly
+- Audit trails maintained for all CRM write operations
+- Episodic memory (Sprint 7) stores only hashed `contato_id` — never name, CPF, or health data
 
 ---
 
-*Built as a real-world production system for a dental clinic, then abstracted into a reusable architecture showcase.*
+## Infrastructure
+
+```
+Mac (development)              VPS Contabo (production, 24/7)
+─────────────────              ──────────────────────────────
+git push → CI/CD               Docker Compose (stack-ia):
+.venv + Cursor                   ia-odonto-api  (FastAPI + Lina)
+                                 ia-odonto-db   (pgvector)
+                                 ia_mariadb     (CRM billing)
+                                 ia_CRM
+                                 ia_n8n
+                                 ia_evolution   (WhatsApp gateway)
+                                 nginx-proxy-manager
+```
+
+---
+
+*Built as a real production system for a dental clinic, then abstracted into a reusable architecture showcase.*
