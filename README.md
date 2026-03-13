@@ -9,7 +9,8 @@
 ![Docker](https://img.shields.io/badge/Docker-Compose-blue)
 ![pgvector](https://img.shields.io/badge/pgvector-PostgreSQL-336791?logo=postgresql)
 
-<!-- In progress — Sprint 5B onwards -->
+> In progress — Sprint 5B onwards
+
 ![dbt](https://img.shields.io/badge/dbt-Silver%20Layer-FF694B?logo=dbt)
 ![Databricks](https://img.shields.io/badge/Databricks-Delta%20Lake-FF3621?logo=databricks)
 ![Snowflake](https://img.shields.io/badge/Snowflake-Gold%20Layer-29B5E8?logo=snowflake)
