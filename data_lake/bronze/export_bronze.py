@@ -43,6 +43,7 @@ BRONZE_PATH = Path(__file__).parent
 def _mariadb_engine():
     """Builds SQLAlchemy engine for MariaDB (EspoCRM billing database)."""
     from urllib.parse import quote_plus
+
     host = os.getenv("MARIADB_HOST", "ia_mariadb")
     port = os.getenv("MARIADB_PORT", "3306")
     db = os.getenv("MARIADB_DATABASE", "espocrm")
