@@ -4,7 +4,7 @@
 # Instalar: pip install -r requirements.txt
 # Dev:      pip install -r requirements-dev.txt
 
-# ── API ──────────────────────────────────────
+# ── API ─────────────────────────────────────
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
 python-multipart==0.0.12
