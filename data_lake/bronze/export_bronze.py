@@ -28,6 +28,7 @@ from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+from urllib.parse import quote_plus
 
 load_dotenv()
 logging.basicConfig(
@@ -40,12 +41,12 @@ BRONZE_PATH = Path(__file__).parent
 
 
 def _mariadb_engine():
-    """Builds SQLAlchemy engine for MariaDB (EspoCRM billing database)."""
+
     host = os.getenv("MARIADB_HOST", "ia_mariadb")
     port = os.getenv("MARIADB_PORT", "3306")
     db = os.getenv("MARIADB_DATABASE", "espocrm")
     user = os.getenv("MARIADB_USER", "")
-    pwd = os.getenv("MARIADB_PASSWORD", "")
+    pwd = quote_plus(os.getenv("MARIADB_PASSWORD", ""))
     url = f"mysql+pymysql://{user}:{pwd}@{host}:{port}/{db}"
     return create_engine(url, pool_pre_ping=True)
 
@@ -107,7 +108,7 @@ def export_rag_audit():
     Contains only institutional knowledge records — no patient data.
     """
     logger.info("[2/2] Exporting RAG audit (PostgreSQL)...")
-    query = text("SELECT uuid, name, cmetadata FROM langchain_pg_collection")
+    query = text("SELECT uuid::text, name, cmetadata FROM langchain_pg_collection")
     try:
         engine = _postgres_engine()
         with engine.connect() as conn:
