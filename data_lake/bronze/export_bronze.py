@@ -109,7 +109,7 @@ def export_rag_audit():
     Contains only institutional knowledge records — no patient data.
     """
     logger.info("[2/2] Exporting RAG audit (PostgreSQL)...")
-    query = text("SELECT uuid, name, cmetadata FROM langchain_pg_collection")
+    query = text("SELECT uuid::text, name, cmetadata FROM langchain_pg_collection")
     try:
         engine = _postgres_engine()
         with engine.connect() as conn:
