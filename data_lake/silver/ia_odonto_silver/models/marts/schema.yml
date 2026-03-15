@@ -1,0 +1,45 @@
+version: 2
+
+models:
+  - name: fct_ltv
+    description: >
+      Fact table with LTV and visit metrics per anonymized patient.
+      Aggregates billing data from stg_recebimentos.
+      Key metric for re-engagement campaigns and revenue analysis.
+
+    columns:
+      - name: contato_hash
+        description: SHA-256 + salt anonymized patient identifier
+        tests:
+          - not_null
+          - unique
+
+      - name: ltv_acumulado
+        description: Total amount paid by patient in BRL
+        tests:
+          - not_null
+
+      - name: ticket_medio
+        description: Average payment value per visit
+        tests:
+          - not_null
+
+      - name: frequencia_visitas
+        description: Total number of visits recorded
+        tests:
+          - not_null
+
+      - name: primeira_visita
+        description: Date of first recorded payment
+        tests:
+          - not_null
+
+      - name: ultima_visita
+        description: Date of most recent payment
+        tests:
+          - not_null
+
+      - name: dias_desde_ultima_visita
+        description: Days elapsed since last visit — used for re-engagement alerts
+        tests:
+          - not_null
