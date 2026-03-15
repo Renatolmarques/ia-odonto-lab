@@ -40,3 +40,17 @@ Thumbs.db
 
 # ZIP files
 *.zip
+
+# dbt
+data_lake/silver/*.duckdb
+data_lake/*.duckdb
+data_lake/silver/ia_odonto_silver/profiles.yml
+data_lake/silver/ia_odonto_silver/target/
+data_lake/silver/ia_odonto_silver/logs/
+data_lake/silver/ia_odonto_silver/dbt_packages/
+
+# Logs
+logs/
+
+# Bronze — dados reais nunca sobem
+data_lake/bronze/

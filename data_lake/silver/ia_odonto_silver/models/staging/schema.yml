@@ -1,0 +1,40 @@
+version: 2
+
+models:
+  - name: stg_recebimentos
+    description: >
+      Staging model for billing data from EspoCRM MariaDB.
+      Anonymizes patient identifiers with SHA-256 + salt (LGPD compliant).
+      Filters invalid records (valor = 0, null contato_id).
+
+    columns:
+      - name: contato_hash
+        description: SHA-256 hash of contato_id with salt — LGPD compliant anonymization
+        tests:
+          - not_null
+
+      - name: valor
+        description: Payment amount in BRL — always greater than zero
+        tests:
+          - not_null
+
+      - name: moeda
+        description: Currency code — always brl
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['brl']
+
+      - name: data_recebimento
+        description: Payment date
+        tests:
+          - not_null
+
+      - name: status
+        description: Payment status — normalized to lowercase
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['pago', 'pendente', 'cancelado', 'estornado']
