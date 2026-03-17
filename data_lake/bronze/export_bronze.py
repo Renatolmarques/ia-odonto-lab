@@ -4,6 +4,7 @@ IA Odonto Lab — Bronze Layer Export (Medallion Architecture)
 
 Extracts raw data from source systems and saves as Parquet files.
 No transformations — raw data only. LGPD masking happens at Silver layer.
+PII scrubbing applied to free-text fields before Parquet export.
 
 Sources:
   1. MariaDB (EspoCRM billing) → c_recebimento table → Parquet
@@ -24,6 +25,7 @@ Prerequisites:
 """
 import logging
 import os
+import re
 from datetime import date
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -40,6 +42,63 @@ logger = logging.getLogger(__name__)
 
 TODAY = date.today().isoformat()
 BRONZE_PATH = Path(__file__).parent
+
+# ---------------------------------------------------------------------------
+# PII scrubbing patterns — applied to free-text fields before Parquet export
+# Defense-in-depth: LLM prompt guardrail is first; this regex layer is second
+# Column names kept in Portuguese to match EspoCRM DDL
+# ---------------------------------------------------------------------------
+_PII_PATTERNS = [
+    # PIX key (UUID) — must come BEFORE CPF to avoid partial digit capture
+    (
+        re.compile(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            re.IGNORECASE,
+        ),
+        "[PIX_REDACTED]",
+    ),
+    # Credit/debit card: 16 digits — must come BEFORE CPF
+    (
+        re.compile(r"\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b"),
+        "[CARD_REDACTED]",
+    ),
+    # Brazilian phone international: +5511999998888 — specific, before CPF
+    (
+        re.compile(r"\+55\s?\(?\d{2}\)?\s?\d{4,5}[\s\-]?\d{4}"),
+        "[PHONE_REDACTED]",
+    ),
+    # Brazilian phone local: (11) 99999-8888 or 11 99999-8888
+    (
+        re.compile(r"\(?\d{2}\)?\s?\d{4,5}[\s\-]?\d{4}"),
+        "[PHONE_REDACTED]",
+    ),
+    # Brazilian CPF: 123.456.789-00 or 12345678900 — after longer patterns
+    (re.compile(r"\d{3}\.?\d{3}\.?\d{3}-?\d{2}"), "[CPF_REDACTED]"),
+    # Brazilian RG: 12.345.678-9 — after CPF
+    (re.compile(r"\d{2}\.?\d{3}\.?\d{3}-?\d{1}"), "[RG_REDACTED]"),
+    # Email address
+    (re.compile(r"[\w\.\-]+@[\w\.\-]+\.\w+"), "[EMAIL_REDACTED]"),
+    # Brazilian bank account: agency + account
+    (re.compile(r"\b\d{4}[\s\-]?\d{5,6}[\s\-]?\d{1}\b"), "[ACCOUNT_REDACTED]"),
+]
+
+
+def scrub_pii(text):
+    """
+    Removes PII patterns from AI-generated free-text fields before Bronze export.
+
+    Applies regex patterns for CPF, card numbers, phones, emails, RG, PIX keys,
+    and bank account numbers. Returns None if input is None.
+
+    This is a defense-in-depth layer — the LLM prompt guardrail in n8n is first.
+    Regex covers ~90% of structured PII patterns; unstructured PII (names,
+    addresses written in full prose) requires NER models (future sprint).
+    """
+    if text is None:
+        return None
+    for pattern, replacement in _PII_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def _mariadb_engine():
@@ -111,6 +170,23 @@ def export_contacts():
     Privacy: NO PII exported (no first_name, last_name, address,
     description, phone or email). Only behavioral/analytical fields.
 
+    Fields selected (DDL-validated column names and types):
+      - id                         varchar(17)   → contact key
+      - c_status_atendimento       varchar(100)  → care status
+      - c_lifetime_value           decimal(13,4) → numeric LTV
+      - c_lifetime_value_currency  varchar(3)    → currency code
+      - c_potencial_venda          decimal(13,4) → numeric sales potential
+      - c_potencial_venda_currency varchar(3)    → currency code
+      - c_qtd_consultas            int(11)       → visit count
+      - c_ultima_visita            date          → last visit date
+      - c_aisummary                mediumtext    → AI clinical summary
+      - created_at                 datetime      → record creation
+      - modified_at                datetime      → last modification
+
+    NOTE: Display fields (c_display_ltv, c_display_potencial,
+    c_display_visitas, c_c_kanban_card) intentionally excluded —
+    formatted strings for UI only, not analytical data.
+    Always filters deleted=0 for soft-deleted rows.
     """
     logger.info("[2/3] Exporting contact (MariaDB)...")
     query = text(
@@ -135,6 +211,8 @@ def export_contacts():
         engine = _mariadb_engine()
         with engine.connect() as conn:
             df = pd.read_sql(query, conn)
+        # Scrub PII from AI-generated free-text field before saving to Parquet
+        df["c_aisummary"] = df["c_aisummary"].apply(scrub_pii)
         out_path = BRONZE_PATH / "contact" / f"dt={TODAY}"
         out_path.mkdir(parents=True, exist_ok=True)
         df.to_parquet(out_path / "data.parquet", index=False)

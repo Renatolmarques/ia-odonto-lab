@@ -5,41 +5,83 @@ models:
     description: >
       Fact table with LTV and visit metrics per anonymized patient.
       Aggregates billing data from stg_recebimentos.
-      Key metric for re-engagement campaigns and revenue analysis.
-
     columns:
       - name: contato_hash
         description: SHA-256 + salt anonymized patient identifier
         tests:
           - not_null
           - unique
-
       - name: ltv_acumulado
         description: Total amount paid by patient in BRL
         tests:
           - not_null
-
       - name: ticket_medio
         description: Average payment value per visit
         tests:
           - not_null
-
       - name: frequencia_visitas
         description: Total number of visits recorded
         tests:
           - not_null
-
       - name: primeira_visita
         description: Date of first recorded payment
         tests:
           - not_null
-
       - name: ultima_visita
         description: Date of most recent payment
         tests:
           - not_null
-
       - name: dias_desde_ultima_visita
-        description: Days elapsed since last visit — used for re-engagement alerts
+        description: Days elapsed since last visit
+        tests:
+          - not_null
+
+  - name: fct_pipeline
+    description: >
+      Gold layer fact table combining contact profile and billing data.
+      Joins stg_contacts and stg_recebimentos via contato_hash.
+      Classifies patients into pipeline segments for re-engagement.
+    columns:
+      - name: contato_hash
+        description: SHA-256 anonymized patient identifier
+        tests:
+          - not_null
+          - unique
+      - name: status_atendimento
+        description: Care status from EspoCRM
+        tests:
+          - not_null
+      - name: pipeline_segment
+        description: Patient classification for CRM campaigns
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['churned', 'upsell_opportunity', 'loyal', 'active']
+      - name: total_pago_recebimentos
+        description: Total billed amount from billing table
+        tests:
+          - not_null
+      - name: qtd_consultas
+        description: Visit count from contact profile
+        tests:
+          - not_null
+
+  - name: fct_ai_performance
+    description: >
+      Gold layer fact table measuring Lina AI assistant performance.
+      Aggregates summary quality and financial impact by quality tier.
+    columns:
+      - name: summary_quality
+        description: AI summary quality classification
+        tests:
+          - not_null
+          - unique
+      - name: total_contacts
+        description: Number of contacts per quality tier
+        tests:
+          - not_null
+      - name: coverage_pct
+        description: Percentage of total contacts covered by AI summaries
         tests:
           - not_null
