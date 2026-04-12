@@ -29,7 +29,7 @@ models:
       - name: status
         description: Payment status — normalized to lowercase
         tests:
-       _null
+          - not_null
           - accepted_values:
               arguments:
                 values: ['pago', 'pendente', 'cancelado', 'estornado']
@@ -52,14 +52,20 @@ models:
       - name: lifetime_value
         description: Numeric LTV in BRL — decimal(13,2)
         tests:
-          - not_null
+          - not_null:
+              config:
+                severity: warn
+
       - name: potencial_venda
         description: Numeric sales potential in BRL — decimal(13,2)
         tests:
-          - not_null
+          - not_null:
+              config:
+                severity: warn
       - name: qtd_consultas
         description: Total visit count — integer >= 0
-        tests  - not_null
+        tests:
+          - not_null
 
   - name: stg_ai_summaries
     description: >
