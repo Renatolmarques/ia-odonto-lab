@@ -115,6 +115,7 @@ def _mariadb_engine():
 def _postgres_engine():
     """Builds SQLAlchemy engine for PostgreSQL (pgvector / lab2 database)."""
     from urllib.parse import quote_plus
+
     host = os.getenv("DB_HOST_LOCAL", "localhost")
     port = os.getenv("DB_PORT_LOCAL", "5433")
     db = os.getenv("DB_NAME", "ia_odonto")
