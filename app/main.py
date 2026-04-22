@@ -8,13 +8,14 @@ Orchestrates the full AI pipeline:
   3. Upsert structured clinical summary into EspoCRM
 
 Endpoints:
-  POST /webhook/n8n_handoff  — main pipeline trigger
+  POST /webhook/n8n_handoff  — main pipeline trigger (requires X-API-Key header)
   GET  /health               — liveness check
 """
 import logging
+import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agents.clinical_agent import processar_conversa
@@ -53,15 +54,27 @@ async def health_check():
 
 
 @app.post("/webhook/n8n_handoff")
-async def n8n_handoff(payload: WebhookPayload):
+async def n8n_handoff(
+    payload: WebhookPayload,
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
     """
-    Main pipeline endpoint.
+    Main pipeline endpoint. Requires a valid X-API-Key header.
 
     Receives a WhatsApp conversation (already buffered and concatenated by n8n),
     runs it through the Lina AI agent, and writes the structured result to EspoCRM.
 
     Audio transcriptions take priority over plain text when both are present.
+
+    Returns 401 if the API key is missing or invalid.
+    Returns 422 if both message_text and audio_transcription are empty.
+    Returns 502 if the AI agent or CRM upsert fails.
     """
+    _expected_key = os.getenv("LINA_API_KEY", "")
+    if not _expected_key or x_api_key != _expected_key:
+        logger.warning("Unauthorized request to /webhook/n8n_handoff — invalid API key")
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
     message = payload.audio_transcription or payload.message_text
     if not message or not message.strip():
         raise HTTPException(
