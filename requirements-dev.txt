@@ -19,3 +19,4 @@ flake8==7.1.1
 # ── dbt Silver Layer ────────────────────
 dbt-core==1.11.7
 dbt-duckdb==1.10.1
+pre-commit==4.6.0
