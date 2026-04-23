@@ -18,5 +18,15 @@ jobs:
           script: |
             cd /opt/ia-odonto-lab
             git pull origin main
-            docker-compose up -d --build
+            docker build -t ia-odonto-lab_api .
+            docker stop ia-odonto-api 2>/dev/null || true
+            docker rm ia-odonto-api 2>/dev/null || true
+            docker run -d \
+              --name ia-odonto-api \
+              --restart unless-stopped \
+              --network ia-odonto-lab_default \
+              -p 127.0.0.1:8000:8000 \
+              --env-file .env \
+              ia-odonto-lab_api
+            docker network connect stack-ia_default ia-odonto-api 2>/dev/null || true
             echo "Deploy concluído: $(date)"
