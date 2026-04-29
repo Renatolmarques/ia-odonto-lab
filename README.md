@@ -8,12 +8,10 @@
 ![LangChain](https://img.shields.io/badge/LangChain-0.3-orange)
 ![Docker](https://img.shields.io/badge/Docker-Compose-blue)
 ![pgvector](https://img.shields.io/badge/pgvector-PostgreSQL-336791?logo=postgresql)
-
-> In progress — Sprint 5B onwards
-
 ![dbt](https://img.shields.io/badge/dbt-Silver%20Layer-FF694B?logo=dbt)
-![Databricks](https://img.shields.io/badge/Databricks-Delta%20Lake-FF3621?logo=databricks)
+![Azure Databricks](https://img.shields.io/badge/Azure%20Databricks-Delta%20Lake-FF3621?logo=databricks)
 ![Snowflake](https://img.shields.io/badge/Snowflake-Gold%20Layer-29B5E8?logo=snowflake)
+![Cloudflare](https://img.shields.io/badge/Cloudflare-Tunnel-F38020?logo=cloudflare)
 
 ---
 
@@ -25,19 +23,20 @@ The bottleneck is not intention. It is memory.
 
 ## The Solution
 
-Lina is a silent AI agent that listens to every WhatsApp Business conversation and writes valuable structured patient's summary directly into the CRM — automatically, with no manual input.
+Lina is a silent AI agent that listens to every WhatsApp Business conversation and writes valuable structured patient's summary directly into the CRM — automatically, with no manual input. And learns through each patient interaction.
 
 What Lina does:
 
- - Registers every new lead with LTV estimate and conversion potential
- - Highlights in CRM: client's potential for high-ticket upsell, payment impediments, and needle phobia/allergies
- - Enriches the CRM with intent classification and visit history
- - Runs 24/7 on a private VPS — no laptop or manual work required
+- Registers every new lead with LTV estimate and conversion potential
+- Highlights in CRM: client's potential for high-ticket upsell, payment impediments, and needle phobia/allergies
+- Enriches the CRM with intent classification and visit history
+- Runs 24/7 on a private cloud (VPS) — no laptop or manual work required
 
-What makes Lina different from a simple webhook:
+What makes Lina different:
 She uses RAG (Retrieval-Augmented Generation) to consult the clinic's knowledge base before generating any AI summary, and structured Pydantic output to guarantee the CRM always receives valid and typed data, with no regex and hallucinated fields.
-A PostgreSQL database stores per-patient profiles with full summaries of each interaction
+A PostgreSQL database stores per-patient profiles with full summaries of each interaction.
 
+---
 
 ## Architecture
 
@@ -83,11 +82,11 @@ CRM REST API (upsert contact + fields)
 | Embeddings | OpenAI text-embedding-3-small | Cost-efficient, high quality |
 | CRM | EspoCRM REST API | Upsert contacts with AI-generated clinical summaries |
 | Orchestration | n8n (self-hosted) | Visual workflow: buffer → GPT → CRM → Lina |
-| Reverse Proxy | Nginx Proxy Manager | HTTPS termination, domain routing |
+| Reverse Proxy | Nginx Proxy Manager + Cloudflare Tunnel | HTTPS termination, domain routing, VPS IP hidden |
 | Infrastructure | VPS + Docker Compose | Cloud-hosted, production-grade, zero downtime |
 | CI/CD | GitHub Actions | Lint → Test → Docker build on every push |
 | Bronze Layer | Parquet (partitioned by date) | Columnar, compressed, market standard |
-| Silver Layer | dbt + Delta Lake (Databricks) | SQL models versioned in Git, ACID, time travel |
+| Silver Layer | dbt + Delta Lake (Azure Databricks) | SQL models versioned in Git, ACID, time travel |
 | Data Warehouse | Snowflake | Star Schema for business analytics |
 | BI Dashboard | Metabase (self-hosted) | Free, simple for non-technical users |
 | Testing | pytest + pytest-asyncio | 18 tests, async coverage |
@@ -108,19 +107,19 @@ n8n runs GPT-4o-mini for fast conversation summarization (nota_timeline, cAisumm
 **dbt for Silver layer — SQL as code**
 Instead of a raw `silver_transform.py`, transformations are dbt SQL models versioned in Git. Each model has automated tests (`not_null`, `accepted_values`) and auto-generated documentation. This is the same tooling applicable to any SQL-heavy data project — a deliberate, transferable choice.
 
-**Delta Lake for portfolio, Parquet for production (small Clinic)**
-The VPS runs Parquet (lightweight, no Spark dependency). Databricks runs Delta Lake (ACID, time travel, schema enforcement) — demonstrating the same pipeline at both scales.
+**Delta Lake for portfolio, Parquet for production**
+The VPS runs Parquet (lightweight, no Spark dependency). Azure Databricks runs Delta Lake (ACID, time travel, schema enforcement) — demonstrating the same pipeline at both scales. The Databricks notebook covers synthetic Bronze ingestion, SHA-256 LGPD masking, Silver Delta Lake with 5 tables, and time travel queries.
 
 **LGPD-compliant RAG**
-The vector database contains only institutional knowledge (clinic FAQs, services, pricing). Patient's confidencial never enters pgvector. PII masking (SHA-256) happens at the Silver layer before any persistence.
+The vector database contains only institutional knowledge (clinic FAQs, services, pricing). Patient data never enters pgvector. PII masking (SHA-256) happens at the Silver layer before any persistence.
 
 **CRM responsibility boundaries**
 Lina writes: `cAisummary`, `cPotencialVenda`, `cQtdConsultas`, `cDisplayPotencial`.
 n8n writes: `cLifetimeValue`, `cCKanbanCard`, `cCUltimoRecebimento`, `cDisplayLTV`.
 Clean separation — neither system overwrites the other.
 
-**Production-grade webhook routing**
-All external webhooks are served over HTTPS via a dedicated domain with DNS and reverse proxy configuration. The domain has no public-facing pages; it exists solely to give the internal services a stable, secure entry point accessible from the internet.
+**Production-grade security**
+All services run behind a Cloudflare Tunnel — the VPS origin IP is never exposed. Docker ports are bound to `127.0.0.1` only. Fail2Ban active with escalating bans. All external traffic reaches the stack exclusively through Cloudflare-proxied domains with HTTPS.
 
 ---
 
@@ -147,7 +146,7 @@ ia-odonto-lab/
 │   ├── silver/
 │   │   ├── models/                  # dbt SQL models (stg_contacts, recebimentos_limpos)
 │   │   ├── silver_transform.py      # PySpark + LGPD masking + feature engineering
-│   │   └── databricks_notebook.ipynb
+│   │   └── databricks_notebook.ipynb  # Azure Databricks: Bronze → Silver Delta Lake, SHA-256, time travel
 │   └── gold/
 │       └── gold_schema.sql          # Snowflake Star Schema DDL
 ├── tests/                           # 18 tests — webhook, RAG, Pydantic rules
@@ -174,7 +173,7 @@ WhatsApp Conversations        MariaDB (CRM billing)
                     ↓
              Silver Layer
          dbt models (SQL versioned in Git)
-         PySpark on Databricks Community
+         PySpark on Azure Databricks
          LGPD: SHA-256 PII masking
          Features:
            ltv_acumulado
@@ -230,15 +229,18 @@ pytest tests/ -v
 ## What Lina Writes to the CRM
 
 ```
-Every conversation produces two outputs: a structured clinical profile that captures what matters about the patient — known allergies, fears, procedures of interest, budget signals — updated automatically as new information emerges across conversations. The second output is a dated note attached to the contact record summarizing what was discussed. 
-Both are written with no manual input.
+Every conversation produces two outputs: a structured clinical profile that captures
+what matters about the patient — known allergies, fears, procedures of interest,
+budget signals — updated automatically as new information emerges across conversations.
+The second output is a dated note attached to the contact record summarizing what
+was discussed. Both are written with no manual input.
 
-**Cumulative AI Profile (example):**
+Cumulative AI Profile (example):
 "Renato Marques. Allergic to domperidone. Fear of needles.
 Interested in teeth whitening (budget around R$ 1,000).
 Most recent contact: asked about cleaning price and clinic address."
 
-**Per-conversation note (example):**
+Per-conversation note (example):
 "Client: Renato Marques — Intent: Scheduling
 Request: Cleaning price and clinic address
 Notes: Known allergy to domperidone, needle anxiety on record."
@@ -255,11 +257,12 @@ Notes: Known allergy to domperidone, needle anxiety on record."
 | 3 | ✅ | LangChain agent + RAG with pgvector |
 | 4 | ✅ | Structured output + CRM upsert + CI/CD + 18 tests |
 | 5A | ✅ | VPS deploy + n8n routing fix + patient_name handoff |
-| 5B | 🔄 | Bronze Layer — Parquet export + daily cron job |
-| 5C | ⬜ | Silver Layer — dbt models + Delta Lake on Databricks |
+| 5B | ✅ | Bronze Layer — Parquet export + daily cron job |
+| 5C | ✅ | Silver Layer — dbt (6 models, 37 tests) + Delta Lake on Azure Databricks |
+| 5D | ✅ | Security — Cloudflare Tunnel + Fail2Ban + Docker network isolation |
 | 6 | ⬜ | Gold Layer — Snowflake Star Schema + Metabase dashboard |
 | 7 | ⬜ | Episodic Memory — pgvector patient_history collection |
-| 8 | ⬜ | Security — UFW, Fail2ban, SSH keys, API auth |
+| 8 | ⬜ | Airflow orchestration + Microsoft Presidio NER |
 | 9 | ⬜ | Fine-tuning showcase — synthetic JSONL + gpt-4o-mini |
 
 ---
@@ -283,10 +286,15 @@ git push → CI/CD               Docker Compose (stack-ia):
 .venv + Cursor                   ia-odonto-api  (FastAPI + Lina)
                                  ia-odonto-db   (pgvector)
                                  ia_mariadb     (CRM billing)
-                                 ia_CRM
-                                 ia_n8n
+                                 ia_espocrm     (CRM)
+                                 ia_n8n         (workflow orchestration)
                                  ia_evolution   (WhatsApp gateway)
                                  nginx-proxy-manager
+
+                               Network security:
+                                 Cloudflare Tunnel (VPS IP hidden)
+                                 All Docker ports → 127.0.0.1 only
+                                 Fail2Ban (4 jails, escalating bans)
 ```
 
 ---
