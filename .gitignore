@@ -53,4 +53,4 @@ data_lake/silver/ia_odonto_silver/dbt_packages/
 logs/
 
 # Bronze — dados reais nunca sobem
-data_lake/silver/ia_odonto_silver/data_lake/
+data_lake/silver/ia_odonto_silver/data_lake/.claudeignore
