@@ -1,28 +1,28 @@
 # requirements.txt — Dependências de PRODUÇÃO
-# IA Odonto Lab | Sprint 4 — versão consolidada (merge com requirements originais)
+# IA Odonto Lab | Sprint 6 — Gold Layer + Snowflake
 #
 # Instalar: pip install -r requirements.txt
 # Dev:      pip install -r requirements-dev.txt
 
-# ── API ─────────────────────────────────────
+# ── API ──────────────────────────────────────────
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
 python-multipart==0.0.12
 
-# ── Validation ────────────────────────────────
+# ── Validation ───────────────────────────────────
 pydantic==2.10.3
 
-# ── HTTP Client (CRM integration) ─────────────
+# ── HTTP Client (CRM integration) ────────────────
 httpx==0.27.2
 requests==2.32.3
 
-# ── Database ───────────────────────────
+# ── Database ─────────────────────────────────────
 psycopg[binary]==3.2.3
 psycopg2-binary==2.9.10
 pgvector==0.2.5
 sqlalchemy==2.0.36
 
-# ── AI / LangChain ───────────────────────────
+# ── AI / LangChain ───────────────────────────────
 langchain==0.3.9
 langchain-openai==0.2.10
 langchain-community==0.3.9
@@ -30,15 +30,18 @@ langchain-postgres==0.0.12
 langchain-text-splitters==0.3.2
 openai==1.56.2
 
-# ── Processing ────────────────────────────
+# ── Processing ───────────────────────────────────
 tiktoken==0.7.0
 pypdf==4.3.1
 
-# ── Utilities ──────────────────────────────
+# ── Utilities ────────────────────────────────────
 python-dotenv==1.0.1
 unstructured[md]==0.11.8
 
-# Bronze Layer
+# ── Bronze Layer ─────────────────────────────────
 pandas==3.0.1
 pyarrow==23.0.1
 pymysql==1.1.2
+
+# ── Gold Layer (Snowflake) ────────────────────────
+snowflake-connector-python==3.6.0
