@@ -18,6 +18,7 @@ Prerequisites:
 import logging
 import os
 from pathlib import Path
+from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 from langchain_community.document_loaders import UnstructuredMarkdownLoader
@@ -40,7 +41,7 @@ CHUNK_OVERLAP = 50
 
 def _get_connection_string() -> str:
     user = os.getenv("DB_USER", "postgres")
-    password = os.getenv("DB_PASSWORD", "postgres")
+    password = quote_plus(os.getenv("DB_PASSWORD", "postgres"))
     host = os.getenv("DB_HOST_LOCAL", "localhost")
     port = os.getenv("DB_PORT_LOCAL", "5433")
     name = os.getenv("DB_NAME", "ia_odonto")
