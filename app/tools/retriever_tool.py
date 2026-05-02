@@ -12,6 +12,7 @@ LGPD: This tool queries ONLY institutional knowledge (FAQs, services, pricing).
 import logging
 import os
 import socket
+from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 from langchain_openai import OpenAIEmbeddings
@@ -36,7 +37,7 @@ def _is_running_in_docker() -> bool:
 def _get_connection_string() -> str:
     """Builds the correct connection string for the current environment."""
     user = os.getenv("DB_USER", "postgres")
-    password = os.getenv("DB_PASSWORD", "postgres")
+    password = quote_plus(os.getenv("DB_PASSWORD", "postgres"))
     name = os.getenv("DB_NAME", "ia_odonto")
     if _is_running_in_docker():
         host, port = os.getenv("DB_HOST", "db"), os.getenv("DB_PORT", "5432")
@@ -52,11 +53,11 @@ def buscar_contexto(pergunta: str, k: int = 3) -> list[dict]:
     Retrieves the k most relevant knowledge base chunks for a given query.
 
     Args:
-        question: Patient message or query text.
+        pergunta: Patient message or query text.
         k: Number of results to return (default: 3).
 
     Returns:
-        List of dicts with 'texto' (content) and 'relevance' (0.0–1.0 score).
+        List of dicts with 'texto' (content) and 'relevancia' (0.0-1.0 score).
         Returns empty list on any error — never propagates exceptions to the agent.
     """
     logger.info("RAG query: %s", pergunta[:80])
