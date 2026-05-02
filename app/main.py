@@ -4,21 +4,23 @@ IA Odonto Lab — FastAPI Application Entry Point
 
 Orchestrates the full AI pipeline:
   1. Receive webhook from n8n (WhatsApp message buffer)
-  2. Invoke Lina clinical agent (LangChain + RAG + structured output)
+  2. Invoke Lina clinical agent (LangChain + RAG + episodic memory + structured output)
   3. Upsert structured clinical summary into EspoCRM
 
 Endpoints:
-  POST /webhook/n8n_handoff  — main pipeline trigger (requires X-API-Key header)
-  GET  /health               — liveness check
+  POST /webhook/n8n_handoff   — main pipeline trigger (requires X-API-Key header)
+  POST /conversations/save    — episodic memory write (requires X-API-Key header)
+  GET  /health                — liveness check
 """
 import logging
-import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agents.clinical_agent import processar_conversa
+from app.dependencies import verify_api_key
+from app.routers import conversations
 from app.schemas import ResumoClinico, WebhookPayload
 from app.services.crm_service import upsert_paciente_no_crm
 
@@ -37,7 +39,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="IA Odonto Lab",
-    version="0.4.0",
+    version="0.5.0",
     description="AI-powered CRM intelligence layer for dental clinics.",
     lifespan=lifespan,
 )
@@ -46,17 +48,19 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
+app.include_router(conversations.router)
+
 
 @app.get("/health")
 async def health_check():
     """Liveness check used by Docker healthcheck and monitoring."""
-    return {"status": "ok", "version": "0.4.0", "service": "ia-odonto-lab"}
+    return {"status": "ok", "version": "0.5.0", "service": "ia-odonto-lab"}
 
 
 @app.post("/webhook/n8n_handoff")
 async def n8n_handoff(
     payload: WebhookPayload,
-    x_api_key: str = Header(None, alias="X-API-Key"),
+    x_api_key: str = Depends(verify_api_key),
 ):
     """
     Main pipeline endpoint. Requires a valid X-API-Key header.
@@ -65,16 +69,10 @@ async def n8n_handoff(
     runs it through the Lina AI agent, and writes the structured result to EspoCRM.
 
     Audio transcriptions take priority over plain text when both are present.
-
     Returns 401 if the API key is missing or invalid.
     Returns 422 if both message_text and audio_transcription are empty.
     Returns 502 if the AI agent or CRM upsert fails.
     """
-    _expected_key = os.getenv("LINA_API_KEY", "")
-    if not _expected_key or x_api_key != _expected_key:
-        logger.warning("Unauthorized request to /webhook/n8n_handoff — invalid API key")
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
     message = payload.audio_transcription or payload.message_text
     if not message or not message.strip():
         raise HTTPException(
@@ -82,7 +80,6 @@ async def n8n_handoff(
         )
 
     logger.info("📩 Webhook received | phone: %s", payload.phone)
-
     try:
         logger.info("🧠 Invoking Lina clinical agent...")
         resumo: ResumoClinico = await processar_conversa(
@@ -97,7 +94,6 @@ async def n8n_handoff(
         logger.info("✅ EspoCRM updated | id: %s", crm_result.get("id"))
 
         return {"status": "processed", "resumo": resumo.model_dump(), "crm": crm_result}
-
     except Exception as exc:
         logger.error("❌ Processing error: %s", str(exc), exc_info=True)
         raise HTTPException(status_code=502, detail=f"Processing error: {str(exc)}")

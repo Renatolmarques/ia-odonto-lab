@@ -52,11 +52,11 @@ def buscar_contexto(pergunta: str, k: int = 3) -> list[dict]:
     Retrieves the k most relevant knowledge base chunks for a given query.
 
     Args:
-        pergunta: Patient message or query text.
+        question: Patient message or query text.
         k: Number of results to return (default: 3).
 
     Returns:
-        List of dicts with 'texto' (content) and 'relevancia' (0.0–1.0 score).
+        List of dicts with 'texto' (content) and 'relevance' (0.0–1.0 score).
         Returns empty list on any error — never propagates exceptions to the agent.
     """
     logger.info("RAG query: %s", pergunta[:80])
