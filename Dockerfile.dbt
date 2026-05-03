@@ -1,0 +1,41 @@
+# Dockerfile.dbt — Dedicated container for the Silver pipeline (dbt + DuckDB)
+# IA Odonto Lab | Sprint 8 — Silver Layer on VPS
+#
+# Single responsibility: run dbt transformations and tests against Bronze Parquet files.
+# Intentionally excludes FastAPI, LangChain, and all API dependencies to keep the image lean.
+#
+# Build: docker build -f Dockerfile.dbt -t ia-odonto-dbt .
+# Run:   docker run --rm --env-file .env ia-odonto-dbt run
+#        docker run --rm --env-file .env ia-odonto-dbt test
+
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# Minimal system dependencies required for dbt-duckdb compilation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install only dbt-core and dbt-duckdb — keeps the image under 500MB
+RUN pip install --no-cache-dir \
+    dbt-core==1.11.7 \
+    dbt-duckdb==1.10.1
+
+# Copy dbt project and entrypoint script
+COPY data_lake/silver /app/data_lake/silver
+COPY scripts/dbt_run_vps.sh /app/scripts/dbt_run_vps.sh
+
+RUN chmod +x /app/scripts/dbt_run_vps.sh
+
+# profiles.yml is mounted via volume at runtime to avoid hardcoding environment-specific paths
+# Bronze Parquet files are mounted read-only via docker-compose volumes
+
+# Accepts dbt subcommands: run, test, docs, etc.
+ENTRYPOINT ["bash", "/app/scripts/dbt_run_vps.sh"]
+CMD ["run"]

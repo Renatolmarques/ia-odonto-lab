@@ -1,3 +1,17 @@
+# docker-compose.yml — Local development and VPS service definitions
+# IA Odonto Lab | Sprint 8
+#
+# Services:
+#   api — FastAPI application with LangChain + pgvector (Lina AI)
+#   db  — PostgreSQL 16 with pgvector extension (episodic memory store)
+#   dbt — Dedicated dbt + DuckDB container for Silver layer transformations
+#         Uses Docker profile "dbt" so it does not start automatically.
+#         Triggered on demand by Airflow or manually via docker run.
+#
+# Networks:
+#   default        — internal bridge network between api and db
+#   stack-ia_default — external network shared with n8n, EspoCRM, Evolution API
+
 services:
   api:
     build: .
@@ -18,8 +32,7 @@ services:
   db:
     image: pgvector/pgvector:pg16
     container_name: ia-odonto-db
-    environment:
-      POSTGRES_USER: postgres
+    environPOSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: ia_odonto
     ports:
@@ -27,6 +40,27 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
+
+  dbt:
+    build:
+      context: .
+      dockerfile: Dockerfile.dbt
+    container_name: ia-odonto-dbt
+    volumes:
+      # Bronze Parquet files — read-only to prevent accidental writes
+      - ./data_lake/bronze:/app/data_lake/bronze:ro
+      # Silver DuckDB database and compiled dbt artifacts
+      - ./data_lake/silver:/app/data_lake/silver
+      # Persistent logs outside the container filesystem
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    # Does not restart automatically — triggered on demand by Airflow
+    restart: "no"
+    profiles:
+      - dbt
+    networks:
+      - default
 
 volumes:
   pgdata:
