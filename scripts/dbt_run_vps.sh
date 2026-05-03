@@ -37,7 +37,7 @@ fi
 cd /app/data_lake/silver/ia_odonto_silver
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Running: dbt $*" | tee -a "$LOG_FILE"
-dbt "$@" 2>&1 | tee -a "$LOG_FILE"
+dbt "$@" --profiles-dir /app/data_lake/silver/ia_odonto_silver 2>&1 | tee -a "$LOG_FILE"
 
 EXIT_CODE=${PIPESTATUS[0]}
 
