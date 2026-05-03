@@ -56,3 +56,9 @@ logs/
 data_lake/silver/ia_odonto_silver/data_lake/.claudeignore
 .claudeignore
 data_lake/gold/results/
+
+# Cursor AI internal rules
+.cursorrules
+
+# dbt user telemetry ID
+data_lake/silver/ia_odonto_silver/.user.yml
