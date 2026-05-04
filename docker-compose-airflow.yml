@@ -1,0 +1,154 @@
+# =============================================================================
+# Airflow — Workflow Orchestrator for IA Odonto Lab
+# =============================================================================
+# Replaces VPS crontab for Bronze → Silver pipeline and disaster-recovery backups.
+# Runs as a standalone stack, connects to stack-ia_default network after startup.
+#
+# Start:  docker-compose -f docker-compose-airflow.yml up -d
+# Stop:   docker-compose -f docker-compose-airflow.yml down
+# Logs:   docker logs ia_airflow --tail 50 -f
+#
+# After first start, connect to existing networks:
+#   docker network connect stack-ia_default ia_airflow
+#   docker network connect ia-odonto-lab_default ia_airflow
+#
+# Web UI: ssh -p 59030 -L 8082:127.0.0.1:8082 root@217.216.65.38 -N
+#         → http://localhost:8082
+#         Login: admin / (AIRFLOW_ADMIN_PASSWORD from .env)
+# =============================================================================
+
+version: "3.8"
+
+services:
+  airflow:
+    image: apache/airflow:2.9.1-python3.11
+    container_name: ia_airflow
+    restart: unless-stopped
+
+    # ------------------------------------------------------------------
+    # Environment — all sensitive values come from .env file
+    # ------------------------------------------------------------------
+    environment:
+      # Core Airflow config
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__CORE__LOGS_FOLDER: /opt/airflow/logs
+
+      # SQLite metadata database (zero extra RAM vs PostgreSQL backend)
+      # Sufficient for single-node LocalExecutor with low DAG volume
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+
+      # Webserver
+      AIRFLOW__WEBSERVER__WEB_SERVER_PORT: 8080
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+
+      # Email alerts via Outlook SMTP (renato_marques_17@hotmail.com)
+      # Requires app password — not your regular Microsoft account password
+      AIRFLOW__SMTP__SMTP_HOST: smtp-mail.outlook.com
+      AIRFLOW__SMTP__SMTP_PORT: "587"
+      AIRFLOW__SMTP__SMTP_STARTTLS: "true"
+      AIRFLOW__SMTP__SMTP_SSL: "false"
+      AIRFLOW__SMTP__SMTP_USER: ${AIRFLOW_SMTP_USER}
+      AIRFLOW__SMTP__SMTP_PASSWORD: ${AIRFLOW_SMTP_PASSWORD}
+      AIRFLOW__SMTP__SMTP_MAIL_FROM: ${AIRFLOW_SMTP_USER}
+
+      # Alert recipient
+      AIRFLOW_ALERT_EMAIL: ${AIRFLOW_ALERT_EMAIL}
+
+      # Admin credentials (used only on first init)
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+
+      # Pipeline paths — must match VPS filesystem mounted as volumes
+      BRONZE_PATH: /app/data_lake/bronze
+      SILVER_PATH: /app/data_lake/silver
+      DBT_PROJECT_PATH: /app/data_lake/silver/ia_odonto_silver
+      DBT_PROFILES_DIR: /app/data_lake/silver/ia_odonto_silver
+
+    # ------------------------------------------------------------------
+    # Ports — bound to 127.0.0.1 only (UFW bypass protection)
+    # Exposed via Nginx Proxy Manager → airflow.lumina-automacao.com.br
+    # ------------------------------------------------------------------
+    ports:
+      - "127.0.0.1:8082:8080"
+
+    # ------------------------------------------------------------------
+    # Volumes
+    # ------------------------------------------------------------------
+    volumes:
+      # DAG files — mounted from project repo (updated via CD pipeline)
+      - /opt/ia-odonto-lab/dags:/opt/airflow/dags:ro
+
+      # Persistent Airflow metadata (SQLite DB + logs)
+      - airflow_data:/opt/airflow
+
+      # Docker socket — required for BashOperator to run docker exec/run
+      # The Airflow container needs to call Docker commands on the host
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # Bronze data — read access for validation task
+      - /opt/ia-odonto-lab/data_lake/bronze:/app/data_lake/bronze:ro
+
+      # Silver data — read access for monitoring
+      - /opt/ia-odonto-lab/data_lake/silver:/app/data_lake/silver:ro
+
+      # Backup directory — write access for backup tasks
+      - /root/backups:/root/backups
+
+      # VPS .env — read access so tasks can reference paths
+      - /opt/ia-odonto-lab/.env:/opt/ia-odonto-lab/.env:ro
+
+      # Logs
+      - /opt/ia-odonto-lab/logs:/app/logs
+
+    # ------------------------------------------------------------------
+    # Entrypoint — initializes DB and creates admin user on first run,
+    # then starts the combined webserver + scheduler (LocalExecutor)
+    # ------------------------------------------------------------------
+    entrypoint: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create
+          --username admin
+          --firstname Renato
+          --lastname Marques
+          --role Admin
+          --email $${AIRFLOW_SMTP_USER}
+          --password $${AIRFLOW_ADMIN_PASSWORD} || true &&
+        airflow scheduler &
+        airflow webserver
+      "
+
+    # ------------------------------------------------------------------
+    # Resource limits — conservative for shared VPS (5.5GB available RAM)
+    # Airflow LocalExecutor + SQLite uses ~400-600MB in practice
+    # ------------------------------------------------------------------
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 400M
+
+    # ------------------------------------------------------------------
+    # Networks — ia_airflow_default created here
+    # stack-ia_default and ia-odonto-lab_default connected post-start
+    # (see startup instructions above)
+    # ------------------------------------------------------------------
+    networks:
+      - default
+
+# ------------------------------------------------------------------
+# Named volumes
+# ------------------------------------------------------------------
+volumes:
+  airflow_data:
+    name: ia_airflow_data
+
+# ------------------------------------------------------------------
+# Networks
+# ------------------------------------------------------------------
+networks:
+  default:
+    name: ia_airflow_default
