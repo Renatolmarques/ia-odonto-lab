@@ -16,8 +16,10 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           port: 59030
           script: |
+            set -e
             cd /opt/ia-odonto-lab
-            git pull origin main
+            git fetch origin main
+            git reset --hard origin/main
             docker build -t ia-odonto-lab_api .
             docker stop ia-odonto-api 2>/dev/null || true
             docker rm ia-odonto-api 2>/dev/null || true
