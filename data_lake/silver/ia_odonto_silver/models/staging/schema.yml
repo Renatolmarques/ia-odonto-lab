@@ -55,7 +55,6 @@ models:
           - not_null:
               config:
                 severity: warn
-
       - name: potencial_venda
         description: Numeric sales potential in BRL — decimal(13,2)
         tests:
@@ -87,5 +86,49 @@ models:
                 values: ['ok', 'too_short', 'empty', 'missing']
       - name: summary_length
         description: Character length of AI summary
+        tests:
+          - not_null
+
+  - name: stg_rag_audit
+    description: >
+      Staging model for RAG query logs exported from PostgreSQL rag_audit table.
+      Each row represents one similarity search performed by Lina — either
+      against the clinic knowledge base (clinica_docs) or patient episodic
+      memory (patient_history). Powers fct_rag_performance for AI observability.
+      Privacy: query_text truncated to 200 chars; patient_id is SHA-256 hash.
+    columns:
+      - name: id
+        description: Surrogate key from PostgreSQL sequence
+        tests:
+          - not_null
+          - unique
+      - name: queried_at
+        description: Timestamp of the RAG query
+        tests:
+          - not_null
+      - name: query_date
+        description: Date portion of queried_at — used for daily aggregation
+        tests:
+          - not_null
+      - name: collection
+        description: pgvector collection searched — clinica_docs or patient_history
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['clinica_docs', 'patient_history']
+      - name: query_type
+        description: Human-readable classification of the RAG call type
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['knowledge_base', 'episodic_memory', 'unknown']
+      - name: results_returned
+        description: Number of chunks actually returned by the similarity search
+        tests:
+          - not_null
+      - name: is_low_quality
+        description: True if no results returned or avg_score below 0.5
         tests:
           - not_null
