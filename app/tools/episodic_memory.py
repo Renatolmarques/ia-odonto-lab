@@ -8,6 +8,8 @@ ensuring no raw PII is ever written to the vector database.
 
 Collection: patient_history (separate from clinica_docs institutional knowledge)
 
+Each retrieval is logged to rag_audit for observability and analytics.
+
 LGPD:
   - Phone number is hashed with SHA-256 + salt before storage.
   - Only conversation summaries/intents are stored — never raw CPF, RG, or card data.
@@ -23,7 +25,7 @@ from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from langchain_postgres import PGVector
 
-from app.tools.retriever_tool import _get_connection_string
+from app.tools.retriever_tool import _get_connection_string, _log_rag_audit
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -89,7 +91,7 @@ def salvar_conversa(phone: str, message_text: str, patient_name: str) -> bool:
     try:
         vs = _get_vectorstore()
         vs.add_documents([doc])
-        logger.info("💾 Episodic memory saved | patient_id: %s...", patient_id[:8])
+        logger.info("Episodic memory saved | patient_id: %s...", patient_id[:8])
         return True
     except Exception as exc:
         logger.error("Failed to save episodic memory: %s", str(exc))
@@ -109,7 +111,7 @@ def buscar_historico_paciente(phone: str, query: str, k: int = 3) -> list[dict]:
         List of dicts with 'texto' and 'relevancia'. Empty list on any error.
     """
     patient_id = _hash_phone(phone)
-    logger.info("🔍 Episodic search | patient_id: %s...", patient_id[:8])
+    logger.info("Episodic search | patient_id: %s...", patient_id[:8])
     try:
         vs = _get_vectorstore()
         results = vs.similarity_search_with_score(
@@ -121,7 +123,22 @@ def buscar_historico_paciente(phone: str, query: str, k: int = 3) -> list[dict]:
             {"texto": doc.page_content, "relevancia": round(1 - score, 2)}
             for doc, score in results
         ]
-        logger.info("📖 %d episodic result(s) retrieved", len(history))
+        logger.info("%d episodic result(s) retrieved", len(history))
+
+        avg_score = (
+            round(sum(r["relevancia"] for r in history) / len(history), 3)
+            if history
+            else 0.0
+        )
+        _log_rag_audit(
+            collection=COLLECTION_HISTORY,
+            query_text=query,
+            k=k,
+            results_returned=len(history),
+            avg_score=avg_score,
+            patient_id=patient_id,
+        )
+
         return history
     except Exception as exc:
         logger.error("Episodic search failed: %s", str(exc))

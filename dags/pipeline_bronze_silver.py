@@ -118,9 +118,10 @@ def validate_parquet(**context):
 
     # Expected columns per table — minimum required for Silver models
     EXPECTED_COLUMNS = {
-        "contact": ["id", "first_name", "last_name", "c_aisummary"],
-        "c_recebimento": ["id", "contato_id", "valor"],
-        "rag_audit": ["id", "phone_suffix", "intent"],
+        # PII fields (first_name, last_name, phone) excluded by LGPD scrubber in export_bronze.py
+        "contact": ["id", "c_status_atendimento", "c_aisummary", "created_at"],
+        "c_recebimento": ["id", "contato_id", "valor", "created_at"],
+        "rag_audit": ["uuid", "name", "cmetadata"],
     }
 
     for table in BRONZE_TABLES:
@@ -199,7 +200,7 @@ DBT_TEST_CMD = (
 # LGPD: no retention of personal data beyond operational need.
 # ---------------------------------------------------------------------------
 CLEANUP_CMD = (
-    "docker exec ia_postgres psql -U postgres -d ia_odonto -c "
+    "docker exec ia_postgres psql -U chatwoot -d n8n_buffer -c "
     '"DELETE FROM message_buffer '
     "WHERE processed = TRUE "
     "AND created_at < NOW() - INTERVAL '30 days';\""

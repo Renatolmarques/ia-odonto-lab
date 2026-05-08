@@ -85,3 +85,41 @@ models:
         description: Percentage of total contacts covered by AI summaries
         tests:
           - not_null
+
+  - name: fct_rag_performance
+    description: >
+      Daily aggregated metrics for Lina RAG observability.
+      Tracks query volume, retrieval quality and peak usage hours.
+      Covers both knowledge base queries and episodic memory retrievals.
+      Recruiter note: demonstrates production monitoring of a live RAG system.
+    columns:
+      - name: query_date
+        description: Aggregation date
+        tests:
+          - not_null
+      - name: query_type
+        description: knowledge_base or episodic_memory
+        tests:
+          - not_null
+      - name: total_queries
+        description: Total RAG calls on this date for this collection type
+        tests:
+          - not_null
+      - name: mean_relevance_score
+        description: Average similarity score (0.0-1.0) — higher is better
+        tests:
+          - not_null:
+              config:
+                severity: warn
+      - name: low_quality_pct
+        description: Percentage of queries with score below 0.5 or zero results
+        tests:
+          - not_null:
+              config:
+                severity: warn
+      - name: score_7d_avg
+        description: Rolling 7-day average relevance score for trend analysis
+        tests:
+          - not_null:
+              config:
+                severity: warn
