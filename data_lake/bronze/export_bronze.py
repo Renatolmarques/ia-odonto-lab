@@ -231,16 +231,37 @@ def export_contacts():
 
 def export_rag_audit():
     """
-    Exports RAG collection metadata from PostgreSQL for audit purposes.
-    Contains only institutional knowledge records — no patient data.
+    Exports RAG query logs from PostgreSQL for observability and analytics.
+
+    Each row represents one similarity search performed by the Lina AI assistant,
+    covering both institutional knowledge (clinica_docs) and episodic memory
+    (patient_history). Powers the stg_rag_audit and fct_rag_performance dbt models.
+
+    Privacy: query_text is truncated to 500 chars and has passed through
+    _scrub_pii() at write time (retriever_tool.py). patient_id is a
+    SHA-256 hash — never a raw phone number.
     """
-    logger.info("[3/3] Exporting RAG audit (PostgreSQL)...")
-    query = text("SELECT uuid::text, name, cmetadata FROM langchain_pg_collection")
+    logger.info("[3/3] Exporting rag_audit (PostgreSQL)...")
+    query = text(
+        """
+        SELECT
+            id,
+            created_at,
+            collection,
+            query_text,
+            k,
+            results_returned,
+            avg_score,
+            patient_id
+        FROM rag_audit
+        ORDER BY created_at
+        """
+    )
     try:
         engine = _postgres_engine()
         with engine.connect() as conn:
             df = pd.read_sql(query, conn)
-        logger.info("      %d collection(s) found", len(df))
+        logger.info("      %d RAG query log(s) found", len(df))
         out_path = BRONZE_PATH / "rag_audit" / f"dt={TODAY}"
         out_path.mkdir(parents=True, exist_ok=True)
         df.to_parquet(out_path / "data.parquet", index=False)
@@ -251,7 +272,8 @@ def export_rag_audit():
             (out_path / "data.parquet").stat().st_size / 1024,
         )
     except Exception as exc:
-        logger.error("Failed to export RAG audit: %s", str(exc))
+        logger.error("Failed to export rag_audit: %s", str(exc))
+        logger.error("Run migration first: app/db/migrations/001_create_rag_audit.sql")
 
 
 def main():

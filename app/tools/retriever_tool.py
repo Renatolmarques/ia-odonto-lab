@@ -6,6 +6,8 @@ Performs similarity search against the clinic knowledge base stored in pgvector.
 Automatically detects whether running inside Docker or locally and adjusts
 the connection string accordingly — no manual configuration switch needed.
 
+Each query is logged to the rag_audit table for observability and analytics.
+
 LGPD: This tool queries ONLY institutional knowledge (FAQs, services, pricing).
       Patient data never enters the vector database.
 """
@@ -14,6 +16,7 @@ import os
 import socket
 from urllib.parse import quote_plus
 
+import psycopg2
 from dotenv import load_dotenv
 from langchain_openai import OpenAIEmbeddings
 from langchain_postgres import PGVector
@@ -48,6 +51,58 @@ def _get_connection_string() -> str:
     return f"postgresql+psycopg://{user}:{password}@{host}:{port}/{name}"
 
 
+def _get_psycopg2_conn():
+    """Returns a raw psycopg2 connection for direct SQL writes (rag_audit)."""
+    user = os.getenv("DB_USER", "postgres")
+    password = os.getenv("DB_PASSWORD", "postgres")
+    name = os.getenv("DB_NAME", "ia_odonto")
+    if _is_running_in_docker():
+        host, port = os.getenv("DB_HOST", "db"), os.getenv("DB_PORT", "5432")
+    else:
+        host, port = os.getenv("DB_HOST_LOCAL", "localhost"), os.getenv(
+            "DB_PORT_LOCAL", "5433"
+        )
+    return psycopg2.connect(
+        host=host, port=port, dbname=name, user=user, password=password
+    )
+
+
+def _log_rag_audit(
+    collection: str,
+    query_text: str,
+    k: int,
+    results_returned: int,
+    avg_score: float,
+    patient_id: str | None = None,
+) -> None:
+    """
+    Writes a single row to rag_audit for observability.
+    Fails silently — never interrupts the main query flow.
+    """
+    try:
+        conn = _get_psycopg2_conn()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO rag_audit
+                        (collection, query_text, k, results_returned, avg_score, patient_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        collection,
+                        query_text[:500],
+                        k,
+                        results_returned,
+                        avg_score,
+                        patient_id,
+                    ),
+                )
+        conn.close()
+    except Exception as exc:
+        logger.warning("rag_audit write failed (non-critical): %s", str(exc))
+
+
 def buscar_contexto(pergunta: str, k: int = 3) -> list[dict]:
     """
     Retrieves the k most relevant knowledge base chunks for a given query.
@@ -72,7 +127,21 @@ def buscar_contexto(pergunta: str, k: int = 3) -> list[dict]:
             {"texto": doc.page_content, "relevancia": round(1 - score, 2)}
             for doc, score in results
         ]
-        logger.info("📚 RAG returned %d result(s)", len(context))
+        logger.info("RAG returned %d result(s)", len(context))
+
+        avg_score = (
+            round(sum(r["relevancia"] for r in context) / len(context), 3)
+            if context
+            else 0.0
+        )
+        _log_rag_audit(
+            collection=COLLECTION_NAME,
+            query_text=pergunta,
+            k=k,
+            results_returned=len(context),
+            avg_score=avg_score,
+        )
+
         return context
     except Exception as exc:
         logger.error("RAG query failed: %s", str(exc))
