@@ -51,6 +51,7 @@ COPY --from=builder /install /usr/local
 
 # Copiar código da aplicação
 COPY app /app/app
+COPY data_lake /app/data_lake
 COPY init_db.py /app/init_db.py
 
 # Usuário não-root (boa prática de segurança)

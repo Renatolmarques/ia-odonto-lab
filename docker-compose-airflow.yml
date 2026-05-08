@@ -14,7 +14,7 @@
 #
 # Web UI: ssh -p 59030 -L 8082:127.0.0.1:8082 root@217.216.65.38 -N
 #         → http://localhost:8082
-#         Login: admin / (AIRFLOW_ADMIN_PASSWORD from .env)
+#         Login: admin / (AIRFLOW_ADMIN_PASSWORD from .env.airflow)
 # =============================================================================
 
 version: "3.8"
@@ -26,8 +26,18 @@ services:
     restart: unless-stopped
 
     # ------------------------------------------------------------------
-    # Environment — all sensitive values come from .env file
+    # User — run as airflow (UID 50000) with docker group (GID 112)
+    # GID 112 = docker group on the host VPS (confirmed via stat /var/run/docker.sock)
+    # Required so BashOperator can call docker exec/run on the host
     # ------------------------------------------------------------------
+    user: "50000:112"
+
+    # ------------------------------------------------------------------
+    # Environment — all sensitive values come from .env.airflow file
+    # ------------------------------------------------------------------
+    env_file:
+      - /opt/ia-odonto-lab/.env.airflow
+
     environment:
       # Core Airflow config
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -35,13 +45,12 @@ services:
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
       AIRFLOW__CORE__LOGS_FOLDER: /opt/airflow/logs
 
-      # SQLite metadata database (zero extra RAM vs PostgreSQL backend)
-      # Sufficient for single-node LocalExecutor with low DAG volume
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      # PostgreSQL metadata database — production-grade, supports LocalExecutor
+      # multi-write and concurrent task logging (vs SQLite which locks under load)
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow_pass_2026@ia-odonto-db:5432/airflow
 
       # Webserver
       AIRFLOW__WEBSERVER__WEB_SERVER_PORT: 8080
-      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
 
       # Email alerts via Outlook SMTP (renato_marques_17@hotmail.com)
@@ -50,15 +59,6 @@ services:
       AIRFLOW__SMTP__SMTP_PORT: "587"
       AIRFLOW__SMTP__SMTP_STARTTLS: "true"
       AIRFLOW__SMTP__SMTP_SSL: "false"
-      AIRFLOW__SMTP__SMTP_USER: ${AIRFLOW_SMTP_USER}
-      AIRFLOW__SMTP__SMTP_PASSWORD: ${AIRFLOW_SMTP_PASSWORD}
-      AIRFLOW__SMTP__SMTP_MAIL_FROM: ${AIRFLOW_SMTP_USER}
-
-      # Alert recipient
-      AIRFLOW_ALERT_EMAIL: ${AIRFLOW_ALERT_EMAIL}
-
-      # Admin credentials (used only on first init)
-      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
 
       # Pipeline paths — must match VPS filesystem mounted as volumes
       BRONZE_PATH: /app/data_lake/bronze
@@ -80,11 +80,11 @@ services:
       # DAG files — mounted from project repo (updated via CD pipeline)
       - /opt/ia-odonto-lab/dags:/opt/airflow/dags:ro
 
-      # Persistent Airflow metadata (SQLite DB + logs)
+      # Persistent Airflow metadata and logs
       - airflow_data:/opt/airflow
 
       # Docker socket — required for BashOperator to run docker exec/run
-      # The Airflow container needs to call Docker commands on the host
+      # Group GID 112 (docker) added to user above grants write access
       - /var/run/docker.sock:/var/run/docker.sock
 
       # Bronze data — read access for validation task
@@ -93,18 +93,17 @@ services:
       # Silver data — read access for monitoring
       - /opt/ia-odonto-lab/data_lake/silver:/app/data_lake/silver:ro
 
-      # Backup directory — write access for backup tasks
-      - /root/backups:/root/backups
-
-      # VPS .env — read access so tasks can reference paths
-      - /opt/ia-odonto-lab/.env:/opt/ia-odonto-lab/.env:ro
+      # Backup directory — writable by Airflow user (uid 50000)
+      # /root/backups is NOT used — /root is drwx------ and blocks uid 50000
+      # even with chmod 777 on the subdirectory itself
+      - /opt/ia-odonto-lab/backups:/opt/ia-odonto-lab/backups
 
       # Logs
       - /opt/ia-odonto-lab/logs:/app/logs
 
     # ------------------------------------------------------------------
-    # Entrypoint — initializes DB and creates admin user on first run,
-    # then starts the combined webserver + scheduler (LocalExecutor)
+    # Entrypoint — migrates DB and creates admin user on first run,
+    # then starts scheduler + webserver (LocalExecutor, single container)
     # ------------------------------------------------------------------
     entrypoint: >
       bash -c "
@@ -122,7 +121,7 @@ services:
 
     # ------------------------------------------------------------------
     # Resource limits — conservative for shared VPS (5.5GB available RAM)
-    # Airflow LocalExecutor + SQLite uses ~400-600MB in practice
+    # Airflow LocalExecutor + PostgreSQL uses ~500-700MB in practice
     # ------------------------------------------------------------------
     deploy:
       resources:
@@ -138,6 +137,7 @@ services:
     # ------------------------------------------------------------------
     networks:
       - default
+      - ia-odonto-lab_default
 
 # ------------------------------------------------------------------
 # Named volumes
@@ -152,3 +152,5 @@ volumes:
 networks:
   default:
     name: ia_airflow_default
+  ia-odonto-lab_default:
+    external: true

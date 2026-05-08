@@ -4,16 +4,22 @@ Schedule: daily at 06:00 UTC (03:00 Recife, UTC-3)
 Purpose: Disaster-recovery backups for all stateful services.
 
 This DAG replaces the following VPS crontab entries:
-  10 3 * * * mariadb-dump → /root/backups/
-  15 3 * * * pg_dump      → /root/backups/
+  10 3 * * * mariadb-dump → /opt/ia-odonto-lab/backups/
+  15 3 * * * pg_dump      → /opt/ia-odonto-lab/backups/
   35 3 * * * curl webhook → n8n → GitHub (docker-compose files)
 
 Backup user strategy:
   MariaDB  → espo-user (MYSQL_PASSWORD env var inside container)
-             Root authentication fails with special chars in .my.cnf (#).
+             Root authentication fails with special chars (#) in .my.cnf config files.
              espo-user has full access to espocrm database and works correctly.
              Redirect (>) must be OUTSIDE sh -c to write to VPS filesystem.
   PostgreSQL → postgres user via pg_dump (no password required inside container)
+
+Backup path: /opt/ia-odonto-lab/backups/
+  This path is mounted in the Airflow container with write permissions.
+  The Airflow user (uid 50000) cannot write to /root/backups/ due to
+  /root directory permissions (drwx------ root root), even with chmod 777
+  on the subdirectory. Moving to /opt/ia-odonto-lab/backups/ solves this.
 
 Stages:
   t_mariadb  ──┐
@@ -48,6 +54,9 @@ DEFAULT_ARGS = {
     "email_on_failure": True,
     "email_on_retry": False,
 }
+
+# Backup destination — writable by Airflow user (uid 50000)
+BACKUP_PATH = "/opt/ia-odonto-lab/backups"
 
 
 # ---------------------------------------------------------------------------
@@ -86,17 +95,17 @@ def _on_failure_callback(context):
 MARIADB_BACKUP_CMD = (
     "docker exec ia_mariadb sh -c "
     "'mariadb-dump -u espo-user -p\"$MYSQL_PASSWORD\" espocrm' "
-    "> /root/backups/mariadb_espocrm_$(date +%Y%m%d).sql"
+    f"> {BACKUP_PATH}/mariadb_espocrm_$(date +%Y%m%d).sql"
 )
 
 # ---------------------------------------------------------------------------
-# Task: PostgreSQL backup (Lina — pgvector embeddings + RAG audit + message_buffer)
+# Task: PostgreSQL backup (Lina — pgvector embeddings + RAG audit)
 # postgres user requires no password inside the container.
 # Same redirect pattern: > outside sh -c writes to VPS filesystem.
 # ---------------------------------------------------------------------------
 POSTGRES_BACKUP_CMD = (
     "docker exec ia-odonto-db pg_dump -U postgres ia_odonto "
-    "> /root/backups/postgres_lina_$(date +%Y%m%d).sql"
+    f"> {BACKUP_PATH}/postgres_lina_$(date +%Y%m%d).sql"
 )
 
 # ---------------------------------------------------------------------------
@@ -105,7 +114,7 @@ POSTGRES_BACKUP_CMD = (
 # which commits them to the private sistema-odonto-crm GitHub repository.
 # ---------------------------------------------------------------------------
 INFRA_BACKUP_CMD = (
-    "curl -s -X POST 'http://localhost:5678/webhook/backup-infra' "
+    "curl -s -X POST 'http://ia_n8n:5678/webhook/backup-infra' "
     "-H 'Content-Type: application/json' "
     '-d "{'
     '\\"stack_ia\\":\\"$(base64 -w0 /home/adminlumina/stack-ia/docker-compose.yml)\\",'
@@ -115,10 +124,10 @@ INFRA_BACKUP_CMD = (
 
 # ---------------------------------------------------------------------------
 # Task: Cleanup old SQL backups (keep last 7 days)
-# Prevents unbounded disk growth on /root/backups/.
+# Prevents unbounded disk growth on the backup directory.
 # ---------------------------------------------------------------------------
 CLEANUP_CMD = (
-    "find /root/backups -name '*.sql' -mtime +7 -delete && "
+    f"find {BACKUP_PATH} -name '*.sql' -mtime +7 -delete && "
     "echo 'Old SQL backups cleaned up.'"
 )
 
@@ -141,6 +150,23 @@ CLEANUP_ESPOCRM_JOBS_CMD = (
     'DELETE FROM job WHERE status = \\"Success\\" AND executed_at < NOW() - INTERVAL 1 DAY;'
     "DELETE FROM scheduled_job_log_record WHERE created_at < NOW() - INTERVAL 1 DAY;"
     "\"'"
+)
+
+# ---------------------------------------------------------------------------
+# Task: Cleanup Airflow metadata database (keep last 30 days)
+#
+# Airflow accumulates DAG run history, task instance logs, and XCom entries
+# indefinitely in the PostgreSQL backend. Without cleanup, this grows
+# silently and can cause performance degradation over time.
+#
+# Uses: airflow db clean --clean-before-timestamp (built-in Airflow command)
+# Retention: 30 days is sufficient for operational debugging and auditing.
+# ---------------------------------------------------------------------------
+CLEANUP_AIRFLOW_HISTORY_CMD = (
+    "docker exec ia_airflow airflow db clean "
+    "--clean-before-timestamp $(date -d '30 days ago' '+%Y-%m-%dT%H:%M:%S+00:00') "
+    "--yes "
+    "&& echo 'Airflow history cleaned up.'"
 )
 
 # ---------------------------------------------------------------------------
@@ -188,11 +214,18 @@ with DAG(
         on_failure_callback=_on_failure_callback,
     )
 
-    # Cleanup EspoCRM internal job logs — runs in parallel with DB backups
-    # No dependency on backups — safe to run anytime
+    # Cleanup EspoCRM internal job logs — runs in parallel, independent of backups
     t_cleanup_espo = BashOperator(
         task_id="cleanup_espocrm_job_logs",
         bash_command=CLEANUP_ESPOCRM_JOBS_CMD,
+        execution_timeout=timedelta(minutes=10),
+        on_failure_callback=_on_failure_callback,
+    )
+
+    # Cleanup Airflow metadata DB — runs in parallel, independent of backups
+    t_cleanup_airflow = BashOperator(
+        task_id="cleanup_airflow_history",
+        bash_command=CLEANUP_AIRFLOW_HISTORY_CMD,
         execution_timeout=timedelta(minutes=10),
         on_failure_callback=_on_failure_callback,
     )
@@ -201,6 +234,8 @@ with DAG(
     # mariadb ──┐
     #           ├──► infra ──► cleanup
     # postgres ──┘
-    # cleanup_espo (independent, parallel)
+    # cleanup_espo     (independent, parallel)
+    # cleanup_airflow  (independent, parallel)
     [t_mariadb, t_postgres] >> t_infra >> t_cleanup
     t_cleanup_espo
+    t_cleanup_airflow
