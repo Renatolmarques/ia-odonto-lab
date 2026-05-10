@@ -11,6 +11,16 @@ Endpoints:
   POST /webhook/n8n_handoff   — main pipeline trigger (requires X-API-Key header)
   POST /conversations/save    — episodic memory write (requires X-API-Key header)
   GET  /health                — liveness check
+
+Security:
+  - Swagger UI, ReDoc and OpenAPI schema are disabled in production.
+    Exposing /docs would leak the full API surface (endpoints, schemas, auth flow)
+    to anyone who can reach the service. Defense in depth: disabled at app level
+    even though Nginx/Cloudflare also block the path externally.
+  - CORS allow_origins is empty: this API is called server-to-server only
+    (n8n → Lina API). No browser-based frontend exists, so no origin needs
+    to be whitelisted. Wildcard "*" would allow any website to call this API
+    from a visitor's browser.
 """
 import logging
 from contextlib import asynccontextmanager
@@ -42,10 +52,20 @@ app = FastAPI(
     version="0.5.0",
     description="AI-powered CRM intelligence layer for dental clinics.",
     lifespan=lifespan,
+    # Disabled in production — prevents endpoint/schema disclosure via Swagger UI.
+    # All API documentation is maintained in the repository README instead.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    CORSMiddleware,
+    # Empty: API is consumed server-to-server (n8n, EspoCRM) — no browser origin needed.
+    # Wildcard would allow arbitrary websites to call this API from a visitor's browser.
+    allow_origins=[],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(conversations.router)

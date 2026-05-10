@@ -9,15 +9,21 @@
 #         Triggered on demand by Airflow or manually via docker run.
 #
 # Networks:
-#   default        — internal bridge network between api and db
+#   default          — internal bridge network between api and db
 #   stack-ia_default — external network shared with n8n, EspoCRM, Evolution API
+#
+# Security:
+#   api port is bound to 127.0.0.1 only — prevents direct external access,
+#   enforcing all traffic to flow through Cloudflare and Nginx Proxy Manager.
+#   Docker bypasses UFW by default, so loopback binding is the only reliable
+#   guarantee at the container level.
 
 services:
   api:
     build: .
     container_name: ia-odonto-api
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./:/app
     env_file:
@@ -32,11 +38,12 @@ services:
   db:
     image: pgvector/pgvector:pg16
     container_name: ia-odonto-db
-    environPOSTGRES_USER: postgres
+    environment:
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: ia_odonto
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
