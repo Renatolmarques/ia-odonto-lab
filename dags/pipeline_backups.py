@@ -147,7 +147,7 @@ CLEANUP_CMD = (
 CLEANUP_ESPOCRM_JOBS_CMD = (
     "docker exec ia_mariadb sh -c '"
     'mariadb -u espo-user -p"$MYSQL_PASSWORD" espocrm -e "'
-    'DELETE FROM job WHERE status = \\"Success\\" AND executed_at < NOW() - INTERVAL 1 DAY;'
+    "DELETE FROM job WHERE executed_at < NOW() - INTERVAL 1 DAY;"
     "DELETE FROM scheduled_job_log_record WHERE created_at < NOW() - INTERVAL 1 DAY;"
     "\"'"
 )
