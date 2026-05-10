@@ -20,16 +20,12 @@ jobs:
             cd /opt/ia-odonto-lab
             git fetch origin main
             git reset --hard origin/main
-            docker build -t ia-odonto-lab_api .
-            docker stop ia-odonto-api 2>/dev/null || true
-            docker rm ia-odonto-api 2>/dev/null || true
-            docker run -d \
-              --name ia-odonto-api \
-              --restart unless-stopped \
-              --network ia-odonto-lab_default \
-              -p 127.0.0.1:8000:8000 \
-              --env-file .env \
-              -v /opt/ia-odonto-lab/data_lake/bronze:/app/data_lake/bronze \
-              -v /opt/ia-odonto-lab/data_lake/silver:/app/data_lake/silver \
-              -v /opt/ia-odonto-lab/logs:/app/logs \
-              ia-odonto-lab_api
+            # Docker Compose v2 reads docker-compose.yml and handles everything declaratively:
+            # - builds the image from the updated Dockerfile
+            # - connects to both networks (ia-odonto-lab_default + stack-ia_default)
+            # - binds port to 127.0.0.1:8000 only (loopback — no external exposure)
+            # - mounts all volumes (bronze, silver, logs)
+            # - applies restart policy (unless-stopped)
+            # No manual docker network connect needed — eliminates the race condition
+            # where the container lost its stack-ia_default connection on redeploy.
+            docker compose up -d --build api
