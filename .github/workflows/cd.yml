@@ -28,4 +28,6 @@ jobs:
             # - applies restart policy (unless-stopped)
             # No manual docker network connect needed — eliminates the race condition
             # where the container lost its stack-ia_default connection on redeploy.
-            docker compose up -d --build api
+            # --no-deps: do not recreate db or dbt — only manage the api container.
+            # ia-odonto-db was created independently and must not be touched by CD.
+            docker compose up -d --build --no-deps api
