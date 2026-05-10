@@ -29,6 +29,7 @@ jobs:
               --network ia-odonto-lab_default \
               -p 127.0.0.1:8000:8000 \
               --env-file .env \
+              -v /opt/ia-odonto-lab/data_lake/bronze:/app/data_lake/bronze \
+              -v /opt/ia-odonto-lab/data_lake/silver:/app/data_lake/silver \
+              -v /opt/ia-odonto-lab/logs:/app/logs \
               ia-odonto-lab_api
-            docker network connect stack-ia_default ia-odonto-api 2>/dev/null || true
-            echo "Deploy concluído: $(date)"
