@@ -1,7 +1,7 @@
 """
 DAG: pipeline_backups
 Schedule: daily at 06:00 UTC (03:00 Recife, UTC-3)
-Purpose: Disaster-recovery backups for all stateful services.
+Purpose: Disaster-recovery backups for all stateful services + log cleanup.
 
 This DAG replaces the following VPS crontab entries:
   10 3 * * * mariadb-dump → /opt/ia-odonto-lab/backups/
@@ -26,21 +26,30 @@ Stages:
   t_postgres ──┼──► t_infra ──► t_cleanup_old_backups
   (parallel)   │
                └── (parallel)
+  t_cleanup_espo         (independent, parallel)
+  t_cleanup_airflow      (independent, parallel)
+  t_cleanup_metabase     (independent, parallel)
+  t_cleanup_rag_audit    (independent, parallel)
+  t_cleanup_app_logs     (independent, parallel)
+  t_cleanup_n8n          (independent, parallel)
 
-On failure: sends alert email to operator.
+On failure: sends alert via n8n webhook → Gmail.
 
 Note: n8n workflow backup (daily 00h) runs inside n8n itself and is NOT
 managed here — it has no dependency on this DAG.
+
+Note: Docker container log rotation is handled by daemon.json (max-size: 10m,
+max-file: 3) — no Airflow task needed for container logs.
 """
 
 from __future__ import annotations
 
-import os
+import json
+import urllib.request
 from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.operators.bash import BashOperator
-from airflow.utils.email import send_email
 
 # ---------------------------------------------------------------------------
 # Default arguments
@@ -50,8 +59,7 @@ DEFAULT_ARGS = {
     "depends_on_past": False,
     "retries": 1,
     "retry_delay": timedelta(minutes=10),
-    "email": [os.environ.get("AIRFLOW_ALERT_EMAIL", "renato_marques_17@hotmail.com")],
-    "email_on_failure": True,
+    "email_on_failure": False,
     "email_on_retry": False,
 }
 
@@ -60,37 +68,36 @@ BACKUP_PATH = "/opt/ia-odonto-lab/backups"
 
 
 # ---------------------------------------------------------------------------
-# Failure callback
+# Failure callback — sends alert via n8n webhook → Gmail
 # ---------------------------------------------------------------------------
 def _on_failure_callback(context):
     dag_id = context["dag"].dag_id
     task_id = context["task_instance"].task_id
-    execution_date = context["execution_date"]
+    execution_date = str(context["execution_date"])
     log_url = context["task_instance"].log_url
 
-    subject = f"[IA Odonto] BACKUP FAILED — {dag_id} / {task_id}"
-    body = (
-        f"Backup task '{task_id}' failed in DAG '{dag_id}'.\n\n"
-        f"Execution date: {execution_date}\n"
-        f"Log: {log_url}\n\n"
-        "Manual backup recommended. Check Airflow UI for details."
-    )
-    send_email(
-        to=DEFAULT_ARGS["email"],
-        subject=subject,
-        html_content=f"<pre>{body}</pre>",
-    )
+    payload = json.dumps(
+        {
+            "dag_id": dag_id,
+            "task_id": task_id,
+            "execution_date": execution_date,
+            "log_url": log_url,
+        }
+    ).encode()
+
+    try:
+        req = urllib.request.Request(
+            "http://ia_n8n:5678/webhook/airflow-alert",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
 # Task: MariaDB backup (EspoCRM — 438MB, allow up to 30 min)
-#
-# Uses espo-user (MYSQL_PASSWORD) instead of root.
-# Root auth fails with special chars (#) in .my.cnf config files.
-# espo-user has full access to espocrm and handles the password correctly.
-#
-# CRITICAL: redirect (>) must be OUTSIDE sh -c to write to VPS filesystem.
-# Inside sh -c it writes to container filesystem and hangs indefinitely.
 # ---------------------------------------------------------------------------
 MARIADB_BACKUP_CMD = (
     "docker exec ia_mariadb sh -c "
@@ -100,8 +107,6 @@ MARIADB_BACKUP_CMD = (
 
 # ---------------------------------------------------------------------------
 # Task: PostgreSQL backup (Lina — pgvector embeddings + RAG audit)
-# postgres user requires no password inside the container.
-# Same redirect pattern: > outside sh -c writes to VPS filesystem.
 # ---------------------------------------------------------------------------
 POSTGRES_BACKUP_CMD = (
     "docker exec ia-odonto-db pg_dump -U postgres ia_odonto "
@@ -110,8 +115,6 @@ POSTGRES_BACKUP_CMD = (
 
 # ---------------------------------------------------------------------------
 # Task: Infrastructure backup (docker-compose files → GitHub via n8n webhook)
-# Sends both docker-compose files base64-encoded to the n8n backup webhook,
-# which commits them to the private sistema-odonto-crm GitHub repository.
 # ---------------------------------------------------------------------------
 INFRA_BACKUP_CMD = (
     "curl -s -X POST 'http://ia_n8n:5678/webhook/backup-infra' "
@@ -124,7 +127,6 @@ INFRA_BACKUP_CMD = (
 
 # ---------------------------------------------------------------------------
 # Task: Cleanup old SQL backups (keep last 7 days)
-# Prevents unbounded disk growth on the backup directory.
 # ---------------------------------------------------------------------------
 CLEANUP_CMD = (
     f"find {BACKUP_PATH} -name '*.sql' -mtime +7 -delete && "
@@ -133,16 +135,6 @@ CLEANUP_CMD = (
 
 # ---------------------------------------------------------------------------
 # Task: Cleanup EspoCRM internal job logs (keep last 1 day)
-#
-# EspoCRM accumulates internal job execution logs indefinitely by default.
-# In 2 months of testing this generated 1.17M rows and 831MB of waste.
-# Tables affected:
-#   job                      — job queue entries (Process Webhook Queue, etc.)
-#   scheduled_job_log_record — scheduled job execution history
-#
-# Retention: 1 day is sufficient for operational debugging.
-# After OPTIMIZE TABLE, size dropped from 831MB to 28MB (96% reduction).
-# This task prevents the problem from recurring automatically.
 # ---------------------------------------------------------------------------
 CLEANUP_ESPOCRM_JOBS_CMD = (
     "docker exec ia_mariadb sh -c '"
@@ -154,13 +146,6 @@ CLEANUP_ESPOCRM_JOBS_CMD = (
 
 # ---------------------------------------------------------------------------
 # Task: Cleanup Airflow metadata database (keep last 30 days)
-#
-# Airflow accumulates DAG run history, task instance logs, and XCom entries
-# indefinitely in the PostgreSQL backend. Without cleanup, this grows
-# silently and can cause performance degradation over time.
-#
-# Uses: airflow db clean --clean-before-timestamp (built-in Airflow command)
-# Retention: 30 days is sufficient for operational debugging and auditing.
 # ---------------------------------------------------------------------------
 CLEANUP_AIRFLOW_HISTORY_CMD = (
     "docker exec ia_airflow airflow db clean "
@@ -170,11 +155,49 @@ CLEANUP_AIRFLOW_HISTORY_CMD = (
 )
 
 # ---------------------------------------------------------------------------
+# Task: Cleanup Metabase query execution logs (keep last 7 days)
+# ---------------------------------------------------------------------------
+CLEANUP_METABASE_LOGS_CMD = (
+    "docker exec ia-odonto-db psql -U postgres -d metabase -c "
+    "\"DELETE FROM query_execution WHERE started_at < NOW() - INTERVAL '7 days';\" "
+    "&& echo 'Metabase query_execution cleaned up.'"
+)
+
+# ---------------------------------------------------------------------------
+# Task: Cleanup rag_audit table (keep last 90 days)
+# ---------------------------------------------------------------------------
+CLEANUP_RAG_AUDIT_CMD = (
+    "docker exec ia-odonto-db psql -U postgres -d ia_odonto -c "
+    "\"DELETE FROM rag_audit WHERE created_at < NOW() - INTERVAL '90 days';\" "
+    "&& echo 'rag_audit cleaned up.'"
+)
+
+# ---------------------------------------------------------------------------
+# Task: Cleanup application log files (daily truncation)
+# ---------------------------------------------------------------------------
+CLEANUP_APP_LOGS_CMD = (
+    "docker exec ia_airflow truncate -s 0 /app/logs/silver_run.log && "
+    "docker exec ia-odonto-api truncate -s 0 /app/data_lake/silver/ia_odonto_silver/logs/dbt.log && "
+    "echo 'Application logs truncated.'"
+)
+
+# ---------------------------------------------------------------------------
+# Task: Cleanup old n8n backups (keep last 7 days)
+#
+# n8n workflow data is backed up daily via crontab to /root/backups/n8n/.
+# Without cleanup, backups grow indefinitely (~7MB/day = ~2.5GB/year).
+# ---------------------------------------------------------------------------
+CLEANUP_N8N_BACKUPS_CMD = (
+    "find /root/backups/n8n -name '*.tar.gz' -mtime +7 -delete && "
+    "echo 'Old n8n backups cleaned up.'"
+)
+
+# ---------------------------------------------------------------------------
 # DAG definition
 # ---------------------------------------------------------------------------
 with DAG(
     dag_id="pipeline_backups",
-    description="Daily disaster-recovery backups: MariaDB, PostgreSQL, docker-compose → GitHub",
+    description="Daily backups + log cleanup: MariaDB, PostgreSQL, docker-compose → GitHub",
     schedule_interval="0 6 * * *",  # 06:00 UTC = 03:00 Recife (UTC-3)
     start_date=datetime(2026, 5, 3),
     catchup=False,
@@ -183,7 +206,6 @@ with DAG(
     tags=["backup", "production", "infrastructure"],
 ) as dag:
 
-    # MariaDB dump — up to 30 min (438MB confirmed in production)
     t_mariadb = BashOperator(
         task_id="backup_mariadb",
         bash_command=MARIADB_BACKUP_CMD,
@@ -191,7 +213,6 @@ with DAG(
         on_failure_callback=_on_failure_callback,
     )
 
-    # PostgreSQL dump — independent, runs in parallel with mariadb
     t_postgres = BashOperator(
         task_id="backup_postgres",
         bash_command=POSTGRES_BACKUP_CMD,
@@ -199,7 +220,6 @@ with DAG(
         on_failure_callback=_on_failure_callback,
     )
 
-    # Infrastructure backup — runs after both DB backups succeed
     t_infra = BashOperator(
         task_id="backup_infra_github",
         bash_command=INFRA_BACKUP_CMD,
@@ -207,14 +227,12 @@ with DAG(
         on_failure_callback=_on_failure_callback,
     )
 
-    # Cleanup old SQL backup files — runs last
     t_cleanup = BashOperator(
         task_id="cleanup_old_backups",
         bash_command=CLEANUP_CMD,
         on_failure_callback=_on_failure_callback,
     )
 
-    # Cleanup EspoCRM internal job logs — runs in parallel, independent of backups
     t_cleanup_espo = BashOperator(
         task_id="cleanup_espocrm_job_logs",
         bash_command=CLEANUP_ESPOCRM_JOBS_CMD,
@@ -222,7 +240,6 @@ with DAG(
         on_failure_callback=_on_failure_callback,
     )
 
-    # Cleanup Airflow metadata DB — runs in parallel, independent of backups
     t_cleanup_airflow = BashOperator(
         task_id="cleanup_airflow_history",
         bash_command=CLEANUP_AIRFLOW_HISTORY_CMD,
@@ -230,12 +247,38 @@ with DAG(
         on_failure_callback=_on_failure_callback,
     )
 
-    # Dependency graph:
-    # mariadb ──┐
-    #           ├──► infra ──► cleanup
-    # postgres ──┘
-    # cleanup_espo     (independent, parallel)
-    # cleanup_airflow  (independent, parallel)
+    t_cleanup_metabase = BashOperator(
+        task_id="cleanup_metabase_logs",
+        bash_command=CLEANUP_METABASE_LOGS_CMD,
+        execution_timeout=timedelta(minutes=5),
+        on_failure_callback=_on_failure_callback,
+    )
+
+    t_cleanup_rag_audit = BashOperator(
+        task_id="cleanup_rag_audit",
+        bash_command=CLEANUP_RAG_AUDIT_CMD,
+        execution_timeout=timedelta(minutes=5),
+        on_failure_callback=_on_failure_callback,
+    )
+
+    t_cleanup_app_logs = BashOperator(
+        task_id="cleanup_app_logs",
+        bash_command=CLEANUP_APP_LOGS_CMD,
+        execution_timeout=timedelta(minutes=2),
+        on_failure_callback=_on_failure_callback,
+    )
+
+    t_cleanup_n8n = BashOperator(
+        task_id="cleanup_n8n_backups",
+        bash_command=CLEANUP_N8N_BACKUPS_CMD,
+        execution_timeout=timedelta(minutes=2),
+        on_failure_callback=_on_failure_callback,
+    )
+
     [t_mariadb, t_postgres] >> t_infra >> t_cleanup
     t_cleanup_espo
     t_cleanup_airflow
+    t_cleanup_metabase
+    t_cleanup_rag_audit
+    t_cleanup_app_logs
+    t_cleanup_n8n
