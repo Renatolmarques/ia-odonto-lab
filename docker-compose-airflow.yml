@@ -55,7 +55,7 @@ services:
 
       # Email alerts via Outlook SMTP (renato_marques_17@hotmail.com)
       # Requires app password — not your regular Microsoft account password
-      AIRFLOW__SMTP__SMTP_HOST: smtp-mail.outlook.com
+      AIRFLOW__SMTP__SMTP_HOST: smtp.gmail.com
       AIRFLOW__SMTP__SMTP_PORT: "587"
       AIRFLOW__SMTP__SMTP_STARTTLS: "true"
       AIRFLOW__SMTP__SMTP_SSL: "false"
