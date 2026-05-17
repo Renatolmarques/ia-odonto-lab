@@ -75,17 +75,29 @@ def read_silver(query: str) -> pd.DataFrame:
 
 
 def load_contacts() -> pd.DataFrame:
+    """
+    Joins fct_pipeline (analytical) with stg_contacts (identity fields).
+    fct_pipeline has contato_hash as key but does not carry nome/telefone/address.
+    stg_contacts is the source of truth for identity fields.
+    """
     return read_silver(
         """
         SELECT
-            contato_hash            AS patient_key,
-            status_atendimento,
-            pipeline_segment,
-            created_at              AS first_contact,
-            ultima_visita           AS last_contact,
-            qtd_consultas           AS total_visits
-        FROM main_marts.fct_pipeline
-    """
+            p.contato_hash          AS patient_key,
+            c.nome,
+            c.telefone,
+            c.bairro,
+            c.cidade,
+            c.endereco_entrega,
+            p.status_atendimento,
+            p.pipeline_segment,
+            p.created_at            AS first_contact,
+            p.ultima_visita         AS last_contact,
+            p.qtd_consultas         AS total_visits
+        FROM main_marts.fct_pipeline p
+        LEFT JOIN main_staging.stg_contacts c
+            ON p.contato_hash = c.contato_hash
+        """
     )
 
 
@@ -101,7 +113,7 @@ def load_ltv() -> pd.DataFrame:
             CAST(dias_desde_ultima_visita AS INTEGER) AS dias_ultima_visita,
             ultima_visita
         FROM main_marts.fct_ltv
-    """
+        """
     )
 
 
@@ -112,7 +124,7 @@ def load_pipeline() -> pd.DataFrame:
             contato_hash,
             CAST(potencial_venda AS DOUBLE) AS estimated_potential
         FROM main_marts.fct_pipeline
-    """
+        """
     )
 
 
@@ -148,7 +160,7 @@ def load_dim_date(conn, df: pd.DataFrame) -> None:
             INSERT INTO gold.dim_date (date_key, year, month, quarter, day_of_week, is_weekend)
             VALUES %s
             ON CONFLICT (date_key) DO NOTHING
-        """,
+            """,
             rows,
         )
     conn.commit()
@@ -157,14 +169,28 @@ def load_dim_date(conn, df: pd.DataFrame) -> None:
 
 def load_dim_patients(conn, df: pd.DataFrame) -> None:
     df = df.copy()
+
+    # Convert NaT to None so psycopg2 inserts NULL instead of the string "NaT"
+    for col in ["first_contact", "last_contact"]:
+        df[col] = df[col].where(df[col].notna(), other=None)
     df["total_visits"] = df["total_visits"].fillna(0).astype(int)
+
+    # Fill missing identity fields with empty string (patients with no address yet)
+    for col in ["nome", "telefone", "bairro", "cidade", "endereco_entrega"]:
+        df[col] = df[col].fillna("") if col in df.columns else ""
+
     rows = [
         (
             r.patient_key,
+            r.nome,
+            r.telefone,
+            r.bairro,
+            r.cidade,
+            r.endereco_entrega,
             r.status_atendimento,
             r.pipeline_segment,
-            r.first_contact,
-            r.last_contact,
+            None if pd.isna(r.first_contact) else r.first_contact,
+            None if pd.isna(r.last_contact) else r.last_contact,
             r.total_visits,
         )
         for r in df.itertuples(index=False)
@@ -174,14 +200,20 @@ def load_dim_patients(conn, df: pd.DataFrame) -> None:
             cur,
             """
             INSERT INTO gold.dim_patients
-                (patient_key, status_atendimento, pipeline_segment, first_contact, last_contact, total_visits)
+                (patient_key, nome, telefone, bairro, cidade, endereco_entrega,
+                 status_atendimento, pipeline_segment, first_contact, last_contact, total_visits)
             VALUES %s
             ON CONFLICT (patient_key) DO UPDATE SET
+                nome               = EXCLUDED.nome,
+                telefone           = EXCLUDED.telefone,
+                bairro             = EXCLUDED.bairro,
+                cidade             = EXCLUDED.cidade,
+                endereco_entrega   = EXCLUDED.endereco_entrega,
                 status_atendimento = EXCLUDED.status_atendimento,
                 pipeline_segment   = EXCLUDED.pipeline_segment,
                 last_contact       = EXCLUDED.last_contact,
                 total_visits       = EXCLUDED.total_visits
-        """,
+            """,
             rows,
         )
     conn.commit()
@@ -224,7 +256,7 @@ def load_fact_interactions(
                 (patient_key, service_key, date_key, estimated_potential,
                  ltv_acumulado, ticket_medio, maior_pagamento, visit_count, dias_ultima_visita)
             VALUES %s
-        """,
+            """,
             rows,
         )
     conn.commit()

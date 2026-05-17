@@ -26,12 +26,18 @@ Stages:
   t_postgres ──┼──► t_infra ──► t_cleanup_old_backups
   (parallel)   │
                └── (parallel)
-  t_cleanup_espo         (independent, parallel)
-  t_cleanup_airflow      (independent, parallel)
-  t_cleanup_metabase     (independent, parallel)
+  t_cleanup_espo_logs    (independent, parallel) — job + scheduled_job_log_record
+  t_cleanup_espo_misc    (independent, parallel) — note, auth_log, action_history,
+                                                   webhook_queue, email_queue,
+                                                   two_factor_code, lead_capture_log_record,
+                                                   campaign_log_record, notification
+  t_cleanup_evolution    (independent, parallel) — Message, Session, Chat
+  t_cleanup_airflow      (independent, parallel) — DB metadata + log files on disk
+  t_cleanup_metabase     (independent, parallel) — query_execution + task_history
   t_cleanup_rag_audit    (independent, parallel)
   t_cleanup_app_logs     (independent, parallel)
   t_cleanup_n8n          (independent, parallel)
+  t_cleanup_docker       (independent, parallel)
 
 On failure: sends alert via n8n webhook → Gmail.
 
@@ -97,7 +103,7 @@ def _on_failure_callback(context):
 
 
 # ---------------------------------------------------------------------------
-# Task: MariaDB backup (EspoCRM — 438MB, allow up to 30 min)
+# Task: MariaDB backup (EspoCRM — allow up to 30 min)
 # ---------------------------------------------------------------------------
 MARIADB_BACKUP_CMD = (
     "docker exec ia_mariadb sh -c "
@@ -134,7 +140,9 @@ CLEANUP_CMD = (
 )
 
 # ---------------------------------------------------------------------------
-# Task: Cleanup EspoCRM internal job logs (keep last 1 day)
+# Task: Cleanup EspoCRM job logs (keep last 1 day)
+# Covers: job, scheduled_job_log_record
+# These are the two largest tables in EspoCRM (25MB + 16MB confirmed 2026-05-17).
 # ---------------------------------------------------------------------------
 CLEANUP_ESPOCRM_JOBS_CMD = (
     "docker exec ia_mariadb sh -c '"
@@ -145,22 +153,84 @@ CLEANUP_ESPOCRM_JOBS_CMD = (
 )
 
 # ---------------------------------------------------------------------------
-# Task: Cleanup Airflow metadata database (keep last 30 days)
+# Task: Cleanup EspoCRM miscellaneous log tables
+#
+# Tables and retention policies (confirmed via SHOW COLUMNS 2026-05-17):
+#   note                    — Lina AI timeline notes        → keep 90 days
+#   auth_log_record         — authentication logs           → keep 30 days
+#   action_history_record   — user action history           → keep 30 days
+#   webhook_queue_item      — processed webhook items       → keep 7 days
+#   email_queue_item        — processed email items         → keep 7 days
+#   two_factor_code         — expired 2FA codes             → keep 1 day
+#   lead_capture_log_record — lead capture logs             → keep 90 days
+#   campaign_log_record     — campaign activity logs        → keep 90 days (action_date)
+#   notification            — user notifications            → keep 30 days (created_at)
+#
+# Note: stream_subscription excluded — no date column available for filtering.
+# ---------------------------------------------------------------------------
+CLEANUP_ESPOCRM_MISC_CMD = (
+    "docker exec ia_mariadb sh -c '"
+    'mariadb -u espo-user -p"$MYSQL_PASSWORD" espocrm -e "'
+    "DELETE FROM note WHERE created_at < NOW() - INTERVAL 90 DAY;"
+    "DELETE FROM auth_log_record WHERE created_at < NOW() - INTERVAL 30 DAY;"
+    "DELETE FROM action_history_record WHERE created_at < NOW() - INTERVAL 30 DAY;"
+    "DELETE FROM webhook_queue_item WHERE created_at < NOW() - INTERVAL 7 DAY;"
+    "DELETE FROM email_queue_item WHERE created_at < NOW() - INTERVAL 7 DAY;"
+    "DELETE FROM two_factor_code WHERE created_at < NOW() - INTERVAL 1 DAY;"
+    "DELETE FROM lead_capture_log_record WHERE created_at < NOW() - INTERVAL 90 DAY;"
+    "DELETE FROM campaign_log_record WHERE action_date < NOW() - INTERVAL 90 DAY;"
+    "DELETE FROM notification WHERE created_at < NOW() - INTERVAL 30 DAY;"
+    "\"'"
+)
+
+# ---------------------------------------------------------------------------
+# Task: Cleanup Evolution API PostgreSQL log tables
+#
+# Tables and retention policies (confirmed via SHOW COLUMNS):
+#   Message  — WhatsApp messages     → keep 90 days (messageTimestamp, epoch int)
+#   Session  — connection sessions   → keep 30 days (createdAt)
+#   Chat     — chat history          → keep 90 days (updatedAt)
+#
+# Note: MessageUpdate excluded — no date column available for filtering.
+# ---------------------------------------------------------------------------
+CLEANUP_EVOLUTION_CMD = (
+    'docker exec ia_postgres psql -U evolution -d evolution -c "'
+    'DELETE FROM \\"Message\\" WHERE \\"messageTimestamp\\" < '
+    "EXTRACT(EPOCH FROM NOW() - INTERVAL '90 days')::bigint;"
+    'DELETE FROM \\"Session\\" WHERE \\"createdAt\\" < NOW() - INTERVAL \'30 days\';'
+    'DELETE FROM \\"Chat\\" WHERE \\"updatedAt\\" < NOW() - INTERVAL \'90 days\';'
+    "\" && echo 'Evolution API tables cleaned up.'"
+)
+
+# ---------------------------------------------------------------------------
+# Task: Cleanup Airflow metadata DB + log files on disk
+#
+# Two-part cleanup:
+#   1. airflow db clean — removes old DAG run metadata from the DB (keep 30 days)
+#   2. find + delete   — removes log files on disk older than 30 days
+#      Airflow log files are stored in /opt/airflow/logs/ (123MB confirmed 2026-05-17).
+#      Without file cleanup, logs grow indefinitely even after DB cleanup.
 # ---------------------------------------------------------------------------
 CLEANUP_AIRFLOW_HISTORY_CMD = (
     "docker exec ia_airflow airflow db clean "
     "--clean-before-timestamp $(date -d '30 days ago' '+%Y-%m-%dT%H:%M:%S+00:00') "
     "--yes "
-    "&& echo 'Airflow history cleaned up.'"
+    "&& docker exec ia_airflow find /opt/airflow/logs -name '*.log' -mtime +30 -delete "
+    "&& echo 'Airflow history and log files cleaned up.'"
 )
 
 # ---------------------------------------------------------------------------
-# Task: Cleanup Metabase query execution logs (keep last 7 days)
+# Task: Cleanup Metabase log tables
+#
+# Tables and retention policies (confirmed via \d 2026-05-17):
+#   query_execution — query logs   → keep 30 days (started_at)
+#   task_history    — async tasks  → keep 30 days (started_at) — 760kB confirmed
 # ---------------------------------------------------------------------------
 CLEANUP_METABASE_LOGS_CMD = (
-    "docker exec ia-odonto-db psql -U postgres -d metabase -c "
-    "\"DELETE FROM query_execution WHERE started_at < NOW() - INTERVAL '7 days';\" "
-    "&& echo 'Metabase query_execution cleaned up.'"
+    'docker exec ia-odonto-db psql -U postgres -d metabase -c "'
+    "DELETE FROM query_execution WHERE started_at < NOW() - INTERVAL '30 days';"
+    "DELETE FROM task_history WHERE started_at < NOW() - INTERVAL '30 days';"
+    "\" && echo 'Metabase logs cleaned up.'"
 )
 
 # ---------------------------------------------------------------------------
@@ -176,21 +246,30 @@ CLEANUP_RAG_AUDIT_CMD = (
 # Task: Cleanup application log files (daily truncation)
 # ---------------------------------------------------------------------------
 CLEANUP_APP_LOGS_CMD = (
-    "docker exec ia_airflow truncate -s 0 /app/logs/silver_run.log && "
-    "docker exec ia-odonto-api truncate -s 0 /app/data_lake/silver/ia_odonto_silver/logs/dbt.log && "
+    "docker exec ia_airflow truncate -s 0 /app/logs/silver_run.log 2>/dev/null || true && "
+    "docker exec ia-odonto-api truncate -s 0 "
+    "/app/data_lake/silver/ia_odonto_silver/logs/dbt.log 2>/dev/null || true && "
     "echo 'Application logs truncated.'"
 )
 
 # ---------------------------------------------------------------------------
 # Task: Cleanup old n8n backups (keep last 7 days)
 #
-# n8n workflow data is backed up daily via crontab to /root/backups/n8n/.
+# n8n workflow data is backed up daily via crontab to /opt/ia-odonto-lab/backups/n8n/.
 # Without cleanup, backups grow indefinitely (~7MB/day = ~2.5GB/year).
 # ---------------------------------------------------------------------------
 CLEANUP_N8N_BACKUPS_CMD = (
-    "find /root/backups/n8n -name '*.tar.gz' -mtime +7 -delete && "
+    "find /opt/ia-odonto-lab/backups/n8n -name '*.tar.gz' -mtime +7 -delete 2>/dev/null || true && "
     "echo 'Old n8n backups cleaned up.'"
 )
+
+# ---------------------------------------------------------------------------
+# Task: Cleanup dangling Docker images, stopped containers, unused networks
+#
+# docker system prune -f removes only dangling resources — it never removes
+# images in use by running containers. Safe to run daily.
+# ---------------------------------------------------------------------------
+CLEANUP_DOCKER_SYSTEM_CMD = "docker system prune -f && " "echo 'Docker system pruned.'"
 
 # ---------------------------------------------------------------------------
 # DAG definition
@@ -240,10 +319,24 @@ with DAG(
         on_failure_callback=_on_failure_callback,
     )
 
+    t_cleanup_espo_misc = BashOperator(
+        task_id="cleanup_espocrm_misc_logs",
+        bash_command=CLEANUP_ESPOCRM_MISC_CMD,
+        execution_timeout=timedelta(minutes=10),
+        on_failure_callback=_on_failure_callback,
+    )
+
+    t_cleanup_evolution = BashOperator(
+        task_id="cleanup_evolution_logs",
+        bash_command=CLEANUP_EVOLUTION_CMD,
+        execution_timeout=timedelta(minutes=10),
+        on_failure_callback=_on_failure_callback,
+    )
+
     t_cleanup_airflow = BashOperator(
         task_id="cleanup_airflow_history",
         bash_command=CLEANUP_AIRFLOW_HISTORY_CMD,
-        execution_timeout=timedelta(minutes=10),
+        execution_timeout=timedelta(minutes=15),
         on_failure_callback=_on_failure_callback,
     )
 
@@ -275,10 +368,23 @@ with DAG(
         on_failure_callback=_on_failure_callback,
     )
 
+    t_cleanup_docker = BashOperator(
+        task_id="cleanup_docker_system",
+        bash_command=CLEANUP_DOCKER_SYSTEM_CMD,
+        execution_timeout=timedelta(minutes=5),
+        on_failure_callback=_on_failure_callback,
+    )
+
+    # Backup chain: MariaDB + Postgres (parallel) → Infra → Cleanup old backups
     [t_mariadb, t_postgres] >> t_infra >> t_cleanup
+
+    # All cleanup tasks run independently and in parallel
     t_cleanup_espo
+    t_cleanup_espo_misc
+    t_cleanup_evolution
     t_cleanup_airflow
     t_cleanup_metabase
     t_cleanup_rag_audit
     t_cleanup_app_logs
     t_cleanup_n8n
+    t_cleanup_docker

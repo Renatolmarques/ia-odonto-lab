@@ -1,0 +1,31 @@
+# Development
+.venv/
+.git/
+.gitignore
+*.md
+*.pyc
+__pycache__/
+
+# Data lake — never include in Docker image
+data_lake/bronze/
+data_lake/silver/silver.duckdb
+data_lake/silver/ia_odonto_silver/target/
+data_lake/silver/ia_odonto_silver/logs/
+data_lake/gold/
+
+# Logs
+logs/
+*.log
+
+# Tests
+tests/
+
+# CI/CD
+.github/
+
+# Airflow DAGs — not needed in API container
+dags/
+
+# Environment files
+.env
+.env.*

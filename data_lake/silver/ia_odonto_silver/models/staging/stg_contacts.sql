@@ -1,7 +1,12 @@
 -- models/staging/stg_contacts.sql
--- Silver Layer: clean and anonymize contact data from Bronze
+-- Silver Layer: clean and normalize contact data from Bronze
 -- LGPD: contact id is irreversibly hashed with SHA-256 + salt
--- No PII fields were extracted at Bronze — only analytical fields
+--
+-- PII policy:
+--   first_name, phone, address_street, address_city, c_delivery_street
+--   are intentionally passed through — exposed to BI under LGPD legitimate
+--   interest (clinical identification). They are NOT hashed or scrubbed here.
+--   c_aisummary was already scrubbed at Bronze (regex + Presidio NER).
 --
 -- Deduplication strategy: Bronze accumulates one partition per day (dt=YYYY-MM-DD).
 -- The wildcard read_parquet loads ALL partitions, producing one row per contact per day.
@@ -18,9 +23,19 @@ with source as (
 ),
 renamed as (
     select
+        -- Identity (hashed) — never expose raw id downstream
         sha256(
             cast(id as varchar) || '{{ env_var("DBT_SALT") }}'
         )                                        as contato_hash,
+
+        -- PII allowed fields — passed through intact for BI (LGPD: legítimo interesse clínico)
+        coalesce(first_name, '')                 as nome,
+        coalesce(phone, '')                      as telefone,
+        coalesce(address_street, '')             as bairro,
+        coalesce(address_city, '')               as cidade,
+        coalesce(c_delivery_street, '')          as endereco_entrega,
+
+        -- Analytical fields
         lower(trim(c_status_atendimento))        as status_atendimento,
         cast(c_lifetime_value as decimal(13,2))  as lifetime_value,
         upper(c_lifetime_value_currency)         as lifetime_value_moeda,
@@ -44,6 +59,11 @@ deduplicated as (
 )
 select
     contato_hash,
+    nome,
+    telefone,
+    bairro,
+    cidade,
+    endereco_entrega,
     status_atendimento,
     lifetime_value,
     lifetime_value_moeda,

@@ -1,25 +1,36 @@
 """
 DAG: pipeline_bronze_silver
-Schedule: every 2 hours
+Schedule: every 30 minutes from 08:00 to 22:30 UTC-3 + nightly run at 02:00 UTC-3.
 Purpose: Orchestrates the full Bronze → Silver data pipeline for the dental clinic.
 
 Pipeline stages:
   1. export_bronze        — Extracts raw data from MariaDB (EspoCRM) and PostgreSQL (Lina)
-                            into partitioned Parquet files. Applies PII scrubbing (regex, 8 patterns).
+                            into partitioned Parquet files. Applies PII scrubbing via regex
+                            (8 patterns) and Microsoft Presidio NER (names, addresses).
   2. validate_parquet     — Checks that Parquet files exist and have expected schema.
                             Empty files are allowed (no patients on a given day) — logged as warning.
   3. dbt_run              — Runs dbt models to transform Bronze Parquet into Silver DuckDB.
                             Produces: stg_contacts, stg_recebimentos, stg_ai_summaries,
                                       fct_ltv, fct_pipeline, fct_ai_performance.
-  4. dbt_test             — Runs dbt data quality tests (35 tests, 2 expected warnings).
+  4. dbt_test             — Runs dbt data quality tests (55 tests, 3 expected warnings).
                             Fails the DAG if any test fails beyond known warnings.
-  5. rotate_parquet       — Parquet partitions older than 90 days.
-                            Industry standard: Bronze is a raw snapshot; Silver consolidates the data.
-                            90-day window covers auditing, emergency reprocessing, and debugging.
+  5. rotate_parquet       — Deletes Bronze Parquet partitions older than 90 days.
+                            Industry standard: Bronze is a raw snapshot; Silver consolidates.
+                            90-day window covers auditing, emergency reprocessing, debugging.
   6. cleanup_buffer       — Deletes processed WhatsApp messages older than 30 days from
                             message_buffer table. LGPD compliance — no retention beyond need.
+  7. trigger_gold         — Triggers pipeline_gold DAG to run immediately after Silver completes.
+                            Gold never runs on a fixed schedule — always triggered by this DAG.
 
 On failure: sends alert via n8n webhook → Gmail.
+
+Schedule rationale:
+  - Every 30 minutes during clinic hours ensures BI data is always fresh (< 30min lag).
+  - Nightly run at 02:00 ensures backups at 03:00 always have up-to-date Silver data.
+  - TriggerDagRunOperator chains Silver → Gold without fixed time offsets.
+
+Note: dbt runs inside ia-odonto-api container (dbt-core + dbt-duckdb in requirements.txt).
+      The ia-odonto-dbt image was retired — all transformations use the main API container.
 """
 
 from __future__ import annotations
@@ -32,6 +43,7 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 # ---------------------------------------------------------------------------
 # Default arguments — applied to every task unless overridden
@@ -91,7 +103,7 @@ def _on_failure_callback(context):
 
 
 # ---------------------------------------------------------------------------
-# Task 1 — Export Bronze
+# Task 1 — Export Bronze (with PII scrubbing via regex + Presidio NER)
 # ---------------------------------------------------------------------------
 EXPORT_CMD = "docker exec ia-odonto-api python /app/data_lake/bronze/export_bronze.py"
 
@@ -157,26 +169,21 @@ def validate_parquet(**context):
 
 # ---------------------------------------------------------------------------
 # Task 3 — dbt run (Silver transformation)
+# Runs inside ia-odonto-api — dbt-core + dbt-duckdb installed via requirements.txt
 # ---------------------------------------------------------------------------
 DBT_RUN_CMD = (
-    "docker run --rm "
-    "--env-file /opt/ia-odonto-lab/.env "
-    "-v /opt/ia-odonto-lab/data_lake/bronze:/app/data_lake/bronze:ro "
-    "-v /opt/ia-odonto-lab/data_lake/silver:/app/data_lake/silver "
-    "-v /opt/ia-odonto-lab/logs:/app/logs "
-    "ia-odonto-dbt run"
+    "docker exec ia-odonto-api "
+    "bash -c 'cd /app/data_lake/silver/ia_odonto_silver && dbt run --profiles-dir . 2>&1 "
+    "| tee /app/logs/silver_run.log; exit ${PIPESTATUS[0]}'"
 )
 
 # ---------------------------------------------------------------------------
 # Task 4 — dbt test (Silver quality gates)
 # ---------------------------------------------------------------------------
 DBT_TEST_CMD = (
-    "docker run --rm "
-    "--env-file /opt/ia-odonto-lab/.env "
-    "-v /opt/ia-odonto-lab/data_lake/bronze:/app/data_lake/bronze:ro "
-    "-v /opt/ia-odonto-lab/data_lake/silver:/app/data_lake/silver "
-    "-v /opt/ia-odonto-lab/logs:/app/logs "
-    "ia-odonto-dbt test"
+    "docker exec ia-odonto-api "
+    "bash -c 'cd /app/data_lake/silver/ia_odonto_silver && dbt test --profiles-dir . 2>&1 "
+    "| tee -a /app/logs/silver_run.log; exit ${PIPESTATUS[0]}'"
 )
 
 # ---------------------------------------------------------------------------
@@ -201,11 +208,13 @@ CLEANUP_CMD = (
 
 # ---------------------------------------------------------------------------
 # DAG definition
+# Schedule: nightly at 05:00 UTC (02:00 Recife) + every 30min from 11:00-01:30 UTC
+#           which corresponds to 08:00-22:30 Recife (UTC-3)
 # ---------------------------------------------------------------------------
 with DAG(
     dag_id="pipeline_bronze_silver",
-    description="Bronze export → Parquet validation → dbt Silver → Parquet rotation (every 2h)",
-    schedule_interval="0 8-23 * * *",
+    description="Bronze export → Parquet validation → dbt Silver → triggers Gold (every 30min)",
+    schedule_interval="*/30 * * * *",
     start_date=datetime(2026, 5, 3),
     catchup=False,
     default_args=DEFAULT_ARGS,
@@ -228,12 +237,14 @@ with DAG(
     t_dbt_run = BashOperator(
         task_id="dbt_run",
         bash_command=DBT_RUN_CMD,
+        execution_timeout=timedelta(minutes=10),
         on_failure_callback=_on_failure_callback,
     )
 
     t_dbt_test = BashOperator(
         task_id="dbt_test",
         bash_command=DBT_TEST_CMD,
+        execution_timeout=timedelta(minutes=10),
         on_failure_callback=_on_failure_callback,
     )
 
@@ -249,4 +260,19 @@ with DAG(
         on_failure_callback=_on_failure_callback,
     )
 
-    t_export >> t_validate >> t_dbt_run >> t_dbt_test >> t_rotate >> t_cleanup
+    t_trigger_gold = TriggerDagRunOperator(
+        task_id="trigger_gold",
+        trigger_dag_id="pipeline_gold",
+        wait_for_completion=False,
+        on_failure_callback=_on_failure_callback,
+    )
+
+    (
+        t_export
+        >> t_validate
+        >> t_dbt_run
+        >> t_dbt_test
+        >> t_rotate
+        >> t_cleanup
+        >> t_trigger_gold
+    )

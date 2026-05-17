@@ -1,7 +1,10 @@
 """
 DAG: pipeline_gold
-Schedule: every 2 hours, 5 minutes after pipeline_bronze_silver completes
+Schedule: None — triggered exclusively by pipeline_bronze_silver via TriggerDagRunOperator.
 Purpose: Loads Silver (DuckDB) into the Gold Layer (PostgreSQL Star Schema).
+
+This DAG never runs on a fixed schedule. It is always triggered by pipeline_bronze_silver
+after dbt Silver completes successfully, ensuring Gold data is always consistent with Silver.
 
 Pipeline stages:
   1. load_gold — Runs load_gold_vps.py inside ia-odonto-api container.
@@ -9,6 +12,10 @@ Pipeline stages:
                  into gold.dim_patients, gold.dim_date, gold.fact_interactions.
 
 On failure: sends alert via n8n webhook → Gmail.
+
+Trigger chain:
+  pipeline_bronze_silver (every 30min + 02:00 nightly)
+    → pipeline_gold (triggered immediately after Silver completes)
 """
 
 from __future__ import annotations
@@ -70,12 +77,12 @@ LOAD_GOLD_CMD = (
 )
 
 # ---------------------------------------------------------------------------
-# DAG definition
+# DAG definition — schedule_interval=None means triggered only externally
 # ---------------------------------------------------------------------------
 with DAG(
     dag_id="pipeline_gold",
-    description="Silver (DuckDB) → Gold Layer PostgreSQL Star Schema (every 2h)",
-    schedule_interval="5 8-23 * * *",
+    description="Silver (DuckDB) → Gold Layer PostgreSQL Star Schema (triggered by Silver)",
+    schedule_interval=None,
     start_date=datetime(2026, 5, 14),
     catchup=False,
     default_args=DEFAULT_ARGS,
@@ -86,5 +93,6 @@ with DAG(
     t_load_gold = BashOperator(
         task_id="load_gold",
         bash_command=LOAD_GOLD_CMD,
+        execution_timeout=timedelta(minutes=10),
         on_failure_callback=_on_failure_callback,
     )

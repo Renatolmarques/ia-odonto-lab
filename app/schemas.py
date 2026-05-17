@@ -53,20 +53,26 @@ class ResumoClinico(BaseModel):
       potencial       → cPotencialVenda (estimated deal value)
       qtd_consultas   → cQtdConsultas
       historico       → part of cAisummary (main CRM field)
+
+    Language note:
+      - Default values and CRM output are in Portuguese (patient-facing).
+      - Internal field names and descriptions remain in English (CV/showcase).
     """
 
-    cliente: str = Field(default="Not identified", description="Patient full name")
-    intencao: Literal["Inquiry", "Scheduling", "Complaint", "Other"] = Field(
-        default="Other", description="Conversation intent"
+    # Defaults in Portuguese — these appear in EspoCRM when the LLM cannot extract data
+    cliente: str = Field(default="Não identificado", description="Patient full name")
+    intencao: Literal["Consulta", "Agendamento", "Reclamação", "Outro"] = Field(
+        default="Outro", description="Conversation intent"
     )
     solicitacao: str = Field(
-        default="Not identified", description="What the patient is asking for"
+        default="Não identificada", description="What the patient is asking for"
     )
     obs: str = Field(
-        default="No additional notes", description="Fears, objections, chronology"
+        default="Nenhuma observação adicional",
+        description="Fears, objections, chronology",
     )
     fobias_alergias: str = Field(
-        default="None reported", description="Phobias and allergies mentioned"
+        default="Nenhuma relatada", description="Phobias and allergies mentioned"
     )
     ltv_pago: float = Field(
         default=0.0, ge=0, description="Payments already made (if mentioned by patient)"
@@ -78,7 +84,8 @@ class ResumoClinico(BaseModel):
         default=0, ge=0, description="Number of past visits identified in conversation"
     )
     historico: str = Field(
-        default="No history available", description="Chronological interaction summary"
+        default="Sem histórico disponível",
+        description="Chronological interaction summary",
     )
 
     @staticmethod
@@ -100,18 +107,19 @@ class ResumoClinico(BaseModel):
         """
         Formats the summary for the EspoCRM cAisummary field in markdown.
         Applies LGPD PII masking before output — CPF and CNPJ are never written to CRM.
+        Output is in Portuguese — visible to the dentist in Metabase and EspoCRM.
         """
         historico_limpo = self._mask_pii(self.historico)
         obs_limpo = self._mask_pii(self.obs)
 
         return (
-            f"**AI Clinical Summary:**\n"
+            f"**Resumo Clínico (IA):**\n"
             f"{self.cliente}. {self.fobias_alergias}. {historico_limpo}\n\n"
-            f"**Technical Note:**\n"
-            f"- Client: {self.cliente}\n"
-            f"- Intent: {self.intencao}\n"
-            f"- Request: {self.solicitacao}\n"
-            f"- Notes: {obs_limpo}\n"
-            f"- Estimated potential: R$ {self.potencial:.2f}\n"
-            f"- Visit count: {self.qtd_consultas}"
+            f"**Nota Técnica:**\n"
+            f"- Cliente: {self.cliente}\n"
+            f"- Intenção: {self.intencao}\n"
+            f"- Solicitação: {self.solicitacao}\n"
+            f"- Observações: {obs_limpo}\n"
+            f"- Potencial estimado: R$ {self.potencial:.2f}\n"
+            f"- Qtd. consultas: {self.qtd_consultas}"
         )
