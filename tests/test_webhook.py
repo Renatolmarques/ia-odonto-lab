@@ -18,14 +18,14 @@ client = TestClient(app)
 VALID_API_KEY = "test-api-key-for-unit-tests"
 
 MOCK_RESUMO = ResumoClinico(
-    cliente="Test Patient",
-    intencao="Inquiry",
-    solicitacao="Dental implant pricing",
-    obs="Patient mentioned fear of needles",
-    fobias_alergias="Fear of needles",
+    cliente="Paciente Teste",
+    intencao="Consulta",
+    solicitacao="Orçamento para implante dentário",
+    obs="Paciente mencionou medo de agulhas",
+    fobias_alergias="Medo de agulhas",
     potencial=3000.0,
     qtd_consultas=0,
-    historico="First contact — asked about implants.",
+    historico="Primeiro contato — perguntou sobre implantes.",
 )
 
 
