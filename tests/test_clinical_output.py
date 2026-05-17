@@ -2,6 +2,9 @@
 """
 Unit tests for ResumoClinico business rules.
 Validates that Pydantic models enforce the CRM data contract.
+
+Note: intencao field uses Portuguese values after 2026-05-17 schema update.
+Valid values: Consulta | Agendamento | Reclamacao | Outro
 """
 import pytest
 from pydantic import ValidationError
@@ -41,7 +44,7 @@ def test_numeric_fields_are_non_negative():
     assert resumo.qtd_consultas >= 0
 
 
-@pytest.mark.parametrize("intent", ["Inquiry", "Scheduling", "Complaint", "Other"])
+@pytest.mark.parametrize("intent", ["Consulta", "Agendamento", "Reclamação", "Outro"])
 def test_valid_intent_values(intent):
     resumo = ResumoClinico(intencao=intent)
     assert resumo.intencao == intent
@@ -49,27 +52,28 @@ def test_valid_intent_values(intent):
 
 def test_invalid_intent_raises_validation_error():
     with pytest.raises(ValidationError):
-        ResumoClinico(intencao="InvalidValue")
+        ResumoClinico(intencao="Inquiry")  # English values no longer accepted
 
 
 def test_format_for_crm_contains_key_fields():
     resumo = ResumoClinico(
-        cliente="John Smith",
-        intencao="Inquiry",
-        solicitacao="Implant pricing",
+        cliente="Maria Silva",
+        intencao="Consulta",
+        solicitacao="Orcamento para implante",
         potencial=3000.0,
         qtd_consultas=2,
     )
     formatted = resumo.formatar_para_crm()
-    assert "John Smith" in formatted
-    assert "Inquiry" in formatted
+    assert "Maria Silva" in formatted
+    assert "Consulta" in formatted
     assert "3000.00" in formatted
+    assert "Resumo Clínico (IA)" in formatted
+    assert "Nota Técnica" in formatted
 
 
 def test_summary_does_not_contain_cpf_pattern():
     """LGPD guardrail: AI output must never contain CPF-like patterns."""
-
-    resumo = ResumoClinico(historico="Patient mentioned their CPF: 123.456.789-00")
+    resumo = ResumoClinico(historico="Paciente mencionou CPF: 123.456.789-00")
     formatted = resumo.formatar_para_crm()
     # This test documents the expectation — the agent guardrails prevent this
     assert isinstance(formatted, str)
