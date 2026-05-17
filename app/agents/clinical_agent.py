@@ -42,14 +42,14 @@ def _build_rag_block(retrieved_context: list[dict]) -> str:
     if not retrieved_context:
         return ""
     lines = "\n".join(
-        f"  - [{round(doc['relevancia'] * 100)}% relevant] {doc['texto']}"
+        f"  - [{round(doc['relevancia'] * 100)}% relevante] {doc['texto']}"
         for doc in retrieved_context
     )
     return f"""
-CLINIC KNOWLEDGE BASE CONTEXT (retrieved automatically via RAG):
+CONTEXTO DA BASE DE CONHECIMENTO DA CLÍNICA (recuperado via RAG):
 {lines}
 
-Use this context to estimate the 'potencial' field based on real service prices.
+Use este contexto para estimar o campo 'potencial' com base nos preços reais dos serviços.
 """
 
 
@@ -58,16 +58,16 @@ def _build_history_block(history: list[dict]) -> str:
     if not history:
         return ""
     lines = "\n".join(
-        f"  - [{round(doc['relevancia'] * 100)}% relevant] {doc['texto']}"
+        f"  - [{round(doc['relevancia'] * 100)}% relevante] {doc['texto']}"
         for doc in history
     )
     return f"""
-PATIENT CONVERSATION HISTORY (retrieved from episodic memory):
+HISTÓRICO DE CONVERSAS DO PACIENTE (memória episódica):
 {lines}
 
-Use this history to enrich the summary with longitudinal context.
-If the patient mentioned something before (fear, procedure interest, past visit),
-incorporate it into 'resumo' and 'fobias_alergias' fields.
+Use este histórico para enriquecer o resumo com contexto longitudinal.
+Se o paciente mencionou algo antes (medo, interesse em procedimento, visita anterior),
+incorpore em 'historico' e 'fobias_alergias'.
 """
 
 
@@ -97,35 +97,36 @@ async def processar_conversa(
     history = buscar_historico_paciente(phone=phone, query=mensagem, k=3)
     logger.info("📖 %d episodic result(s) retrieved", len(history))
 
-    name_hint = f"The patient's name may be '{patient_name}'." if patient_name else ""
+    name_hint = f"O nome do paciente pode ser '{patient_name}'." if patient_name else ""
 
     system_prompt = f"""
-IDENTITY
-You are Lina, a clinical intelligence analyst for a dental clinic.
-Your role is to analyze patient conversations and extract structured data for the CRM.
-You do NOT respond to patients — you only analyze and document.
+IDENTIDADE
+Você é Lina, analista de inteligência clínica de uma clínica odontológica.
+Sua função é analisar conversas de pacientes e extrair dados estruturados para o CRM.
+Você NÃO responde aos pacientes — apenas analisa e documenta.
+Todos os campos de texto devem ser preenchidos em PORTUGUÊS BRASILEIRO.
 
 {name_hint}
 
-GUARDRAILS
-1. NEVER invent data. Use default values if information cannot be extracted.
-2. NEVER make medical diagnoses.
-3. NEVER include CPF, ID numbers, or passwords in the output.
-4. 'potencial': use prices from the RAG context below. If unavailable, use 0.0.
-5. 'intencao': classify as Inquiry | Scheduling | Complaint | Other.
-6. 'ltv_pago': only fill if the patient explicitly mentioned past payments.
-7. 'fobias_alergias': capture any mention of fear, phobia, or allergy.
-8. If patient history exists below, use it to enrich the summary — do not ignore it.
+REGRAS
+1. NUNCA invente dados. Use os valores padrão se a informação não puder ser extraída.
+2. NUNCA faça diagnósticos médicos.
+3. NUNCA inclua CPF, RG, senhas ou números de documentos na saída.
+4. 'potencial': use os preços do contexto RAG abaixo. Se indisponível, use 0.0.
+5. 'intencao': classifique como Consulta | Agendamento | Reclamação | Outro.
+6. 'ltv_pago': preencha apenas se o paciente mencionou pagamentos passados explicitamente.
+7. 'fobias_alergias': capture qualquer menção a medo, fobia ou alergia.
+8. Se houver histórico do paciente abaixo, use-o para enriquecer o resumo — não ignore.
 
 {_build_rag_block(retrieved_context)}
 {_build_history_block(history)}
 
-RETURN ONLY THE STRUCTURED JSON. No text outside the JSON.
+RETORNE APENAS O JSON ESTRUTURADO. Nenhum texto fora do JSON.
 """
 
     messages = [
         SystemMessage(content=system_prompt),
-        HumanMessage(content=f"Analyze this conversation:\n\n{mensagem}"),
+        HumanMessage(content=f"Analise esta conversa:\n\n{mensagem}"),
     ]
 
     llm = ChatOpenAI(
@@ -145,6 +146,7 @@ def testar_agente_langchain(mensagem_paciente: str) -> str:
     """
     Legacy test function — returns free-text response for manual testing.
     Used by test_rag_integration.py (Sprint 3 compatibility).
+    Kept in English for CV/showcase purposes.
 
     For production use, call processar_conversa() instead.
     """

@@ -6,6 +6,12 @@ Extracts raw data from source systems and saves as Parquet files.
 No transformations — raw data only. LGPD masking happens at Silver layer.
 PII scrubbing applied to free-text fields before Parquet export.
 
+Two-layer PII defense:
+  Layer 1 — Regex scrubbing (8 patterns): CPF, RG, card numbers, phones,
+             emails, PIX keys, bank accounts. Covers ~90% of structured PII.
+  Layer 2 — Microsoft Presidio NER: detects unstructured PII (names,
+             addresses) that regex cannot catch. Requires spaCy pt model.
+
 Sources:
   1. MariaDB (EspoCRM billing) → c_recebimento table → Parquet
   2. MariaDB (EspoCRM CRM)     → contact table       → Parquet
@@ -21,7 +27,16 @@ Usage:
 
 Prerequisites:
   - MARIADB_HOST, MARIADB_USER, MARIADB_PASSWORD in .env
-  - pip install pymysql pyarrow
+  - pip install pymysql pyarrow presidio-analyzer presidio-anonymizer spacy
+  - python -m spacy download pt_core_news_lg
+
+EspoCRM schema notes (confirmed via SHOW COLUMNS 2026-05-17):
+  first_name          varchar(100)  — direct column on contact table
+  phone               via JOIN:     entity_phone_number + phone_number tables
+                                    (EspoCRM stores phones in separate M:N tables)
+  address_street      varchar(255)  — Bairro (native field)
+  address_city        varchar(100)  — Cidade (native field)
+  c_delivery_street   mediumtext    — Nome da Rua e Número (custom field)
 """
 import logging
 import os
@@ -40,16 +55,80 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Presidio NER — loaded once per process to avoid repeated model loading cost.
+# Uses pt_core_news_lg (Portuguese) — installed in Dockerfile via pip whl.
+# ---------------------------------------------------------------------------
+try:
+    from presidio_analyzer import AnalyzerEngine
+    from presidio_analyzer.nlp_engine import NlpEngineProvider
+    from presidio_anonymizer import AnonymizerEngine
+
+    provider = NlpEngineProvider(
+        nlp_configuration={
+            "nlp_engine_name": "spacy",
+            "models": [{"lang_code": "pt", "model_name": "pt_core_news_lg"}],
+        }
+    )
+    _analyzer = AnalyzerEngine(
+        nlp_engine=provider.create_engine(),
+        supported_languages=["pt"],
+    )
+    _anonymizer = AnonymizerEngine()
+    _PRESIDIO_AVAILABLE = True
+    logger.info("✅ Presidio NER loaded successfully — full PII protection active.")
+except Exception as e:
+    _PRESIDIO_AVAILABLE = False
+    logger.warning(
+        "⚠️ Presidio NER unavailable (%s) — regex-only PII scrubbing active.", e
+    )
+
 TODAY = date.today().isoformat()
 BRONZE_PATH = Path(__file__).parent
 
 # ---------------------------------------------------------------------------
-# PII scrubbing patterns — applied to free-text fields before Parquet export
-# Defense-in-depth: LLM prompt guardrail is first; this regex layer is second
-# Column names kept in Portuguese to match EspoCRM DDL
+# Contact field policy — three explicit tiers.
+#
+# To add a new field:
+#   - Liberated PII: add to PII_ALLOWED_FIELDS + SQL query
+#   - AI free text:  add to FREE_TEXT_FIELDS + SQL query
+#   - Analytical:    add to ANALYTICAL_FIELDS + SQL query
+# ---------------------------------------------------------------------------
+
+# Tier 1 — PII intentionally exposed to BI (LGPD: legítimo interesse clínico).
+# NOT scrubbed — must reach Gold intact.
+# Note: phone comes from JOIN with entity_phone_number + phone_number tables.
+PII_ALLOWED_FIELDS = [
+    "first_name",  # varchar(100) — direct column on contact
+    "phone",  # via JOIN entity_phone_number + phone_number
+    "address_street",  # varchar(255) — Bairro
+    "address_city",  # varchar(100) — Cidade
+    "c_delivery_street",  # mediumtext   — Nome da Rua e Número
+]
+
+# Tier 2 — AI-generated free text. Scrubbed: regex (L1) + Presidio NER (L2).
+FREE_TEXT_FIELDS = [
+    "c_aisummary",
+]
+
+# Tier 3 — Pure analytical. No scrubbing.
+ANALYTICAL_FIELDS = [
+    "id",
+    "c_status_atendimento",
+    "c_lifetime_value",
+    "c_lifetime_value_currency",
+    "c_potencial_venda",
+    "c_potencial_venda_currency",
+    "c_qtd_consultas",
+    "c_ultima_visita",
+    "created_at",
+    "modified_at",
+]
+
+# ---------------------------------------------------------------------------
+# PII scrubbing patterns — applied ONLY to FREE_TEXT_FIELDS.
 # ---------------------------------------------------------------------------
 _PII_PATTERNS = [
-    # PIX key (UUID) — must come BEFORE CPF to avoid partial digit capture
     (
         re.compile(
             r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
@@ -57,43 +136,18 @@ _PII_PATTERNS = [
         ),
         "[PIX_REDACTED]",
     ),
-    # Credit/debit card: 16 digits — must come BEFORE CPF
-    (
-        re.compile(r"\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b"),
-        "[CARD_REDACTED]",
-    ),
-    # Brazilian phone international: +5511999998888 — specific, before CPF
-    (
-        re.compile(r"\+55\s?\(?\d{2}\)?\s?\d{4,5}[\s\-]?\d{4}"),
-        "[PHONE_REDACTED]",
-    ),
-    # Brazilian phone local: (11) 99999-8888 or 11 99999-8888
-    (
-        re.compile(r"\(?\d{2}\)?\s?\d{4,5}[\s\-]?\d{4}"),
-        "[PHONE_REDACTED]",
-    ),
-    # Brazilian CPF: 123.456.789-00 or 12345678900 — after longer patterns
+    (re.compile(r"\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b"), "[CARD_REDACTED]"),
+    (re.compile(r"\+55\s?\(?\d{2}\)?\s?\d{4,5}[\s\-]?\d{4}"), "[PHONE_REDACTED]"),
+    (re.compile(r"\(?\d{2}\)?\s?\d{4,5}[\s\-]?\d{4}"), "[PHONE_REDACTED]"),
     (re.compile(r"\d{3}\.?\d{3}\.?\d{3}-?\d{2}"), "[CPF_REDACTED]"),
-    # Brazilian RG: 12.345.678-9 — after CPF
     (re.compile(r"\d{2}\.?\d{3}\.?\d{3}-?\d{1}"), "[RG_REDACTED]"),
-    # Email address
     (re.compile(r"[\w\.\-]+@[\w\.\-]+\.\w+"), "[EMAIL_REDACTED]"),
-    # Brazilian bank account: agency + account
     (re.compile(r"\b\d{4}[\s\-]?\d{5,6}[\s\-]?\d{1}\b"), "[ACCOUNT_REDACTED]"),
 ]
 
 
 def scrub_pii(text):
-    """
-    Removes PII patterns from AI-generated free-text fields before Bronze export.
-
-    Applies regex patterns for CPF, card numbers, phones, emails, RG, PIX keys,
-    and bank account numbers. Returns None if input is None.
-
-    This is a defense-in-depth layer — the LLM prompt guardrail in n8n is first.
-    Regex covers ~90% of structured PII patterns; unstructured PII (names,
-    addresses written in full prose) requires NER models (future sprint).
-    """
+    """Layer 1 — Regex scrubbing. Only applied to FREE_TEXT_FIELDS."""
     if text is None:
         return None
     for pattern, replacement in _PII_PATTERNS:
@@ -101,51 +155,62 @@ def scrub_pii(text):
     return text
 
 
+def scrub_pii_presidio(text: str) -> str:
+    """Layer 2 — Presidio NER. Only applied to FREE_TEXT_FIELDS."""
+    if not _PRESIDIO_AVAILABLE or not text:
+        return text
+    try:
+        results = _analyzer.analyze(
+            text=text,
+            language="pt",
+            entities=[
+                "PERSON",
+                "LOCATION",
+                "EMAIL_ADDRESS",
+                "PHONE_NUMBER",
+                "CREDIT_CARD",
+            ],
+        )
+        if not results:
+            return text
+        return _anonymizer.anonymize(text=text, analyzer_results=results).text
+    except Exception:
+        return text
+
+
 def _mariadb_engine():
-    """Builds SQLAlchemy engine for MariaDB (EspoCRM database)."""
     host = os.getenv("MARIADB_HOST", "ia_mariadb")
     port = os.getenv("MARIADB_PORT", "3306")
     db = os.getenv("MARIADB_DATABASE", "espocrm")
     user = os.getenv("MARIADB_USER", "")
     pwd = quote_plus(os.getenv("MARIADB_PASSWORD", ""))
-    url = f"mysql+pymysql://{user}:{pwd}@{host}:{port}/{db}"
-    return create_engine(url, pool_pre_ping=True)
+    return create_engine(
+        f"mysql+pymysql://{user}:{pwd}@{host}:{port}/{db}", pool_pre_ping=True
+    )
 
 
 def _postgres_engine():
-    """Builds SQLAlchemy engine for PostgreSQL (pgvector / lab2 database)."""
-    from urllib.parse import quote_plus
-
     host = os.getenv("DB_HOST_LOCAL", "localhost")
     port = os.getenv("DB_PORT_LOCAL", "5433")
     db = os.getenv("DB_NAME", "ia_odonto")
     user = os.getenv("DB_USER", "postgres")
     pwd = quote_plus(os.getenv("DB_PASSWORD", "postgres"))
-    url = f"postgresql+psycopg://{user}:{pwd}@{host}:{port}/{db}"
-    return create_engine(url, pool_pre_ping=True)
+    return create_engine(
+        f"postgresql+psycopg://{user}:{pwd}@{host}:{port}/{db}", pool_pre_ping=True
+    )
 
 
 def export_recebimentos():
-    """
-    Exports the billing table from MariaDB.
-    Uses contato_id (not contact_id — legacy column).
-    Always filters deleted=0 for soft-deleted rows.
-    """
+    """Exports billing table from MariaDB."""
     logger.info("[1/3] Exporting c_recebimento (MariaDB)...")
     query = text(
         """
         SELECT
-            id,
-            contato_id,
-            valor,
-            valor_currency,
-            data_recebimento,
-            status,
-            created_at,
-            modified_at
+            id, contato_id, valor, valor_currency,
+            data_recebimento, status, created_at, modified_at
         FROM c_recebimento
         WHERE deleted = 0
-        """
+    """
     )
     try:
         engine = _mariadb_engine()
@@ -167,54 +232,63 @@ def export_recebimentos():
 
 def export_contacts():
     """
-    Exports contact analytical fields from EspoCRM (MariaDB).
+    Exports contact fields from EspoCRM (MariaDB) to Bronze Parquet.
 
-    Privacy: NO PII exported (no first_name, last_name, address,
-    description, phone or email). Only behavioral/analytical fields.
-
-    Fields selected (DDL-validated column names and types):
-      - id                         varchar(17)   → contact key
-      - c_status_atendimento       varchar(100)  → care status
-      - c_lifetime_value           decimal(13,4) → numeric LTV
-      - c_lifetime_value_currency  varchar(3)    → currency code
-      - c_potencial_venda          decimal(13,4) → numeric sales potential
-      - c_potencial_venda_currency varchar(3)    → currency code
-      - c_qtd_consultas            int(11)       → visit count
-      - c_ultima_visita            date          → last visit date
-      - c_aisummary                mediumtext    → AI clinical summary
-      - created_at                 datetime      → record creation
-      - modified_at                datetime      → last modification
-
-    NOTE: Display fields (c_display_ltv, c_display_potencial,
-    c_display_visitas, c_c_kanban_card) intentionally excluded —
-    formatted strings for UI only, not analytical data.
-    Always filters deleted=0 for soft-deleted rows.
+    Privacy policy — three tiers:
+      Tier 1 — PII_ALLOWED_FIELDS: exposed to BI (LGPD legítimo interesse).
+        phone requires JOIN with entity_phone_number + phone_number tables
+        because EspoCRM stores phones in a separate M:N relationship.
+        epn.primary=1 ensures only the primary phone is returned.
+      Tier 2 — FREE_TEXT_FIELDS (c_aisummary): regex + Presidio NER scrubbing.
+      Tier 3 — ANALYTICAL_FIELDS: no scrubbing needed.
     """
     logger.info("[2/3] Exporting contact (MariaDB)...")
+    logger.info("PII fields included by policy: %s", PII_ALLOWED_FIELDS)
+
+    # Analytical + address fields come directly from contact table.
+    # phone comes from JOIN with entity_phone_number + phone_number.
     query = text(
         """
         SELECT
-            id,
-            c_status_atendimento,
-            c_lifetime_value,
-            c_lifetime_value_currency,
-            c_potencial_venda,
-            c_potencial_venda_currency,
-            c_qtd_consultas,
-            c_ultima_visita,
-            c_aisummary,
-            created_at,
-            modified_at
-        FROM contact
-        WHERE deleted = 0
-        """
+            c.id,
+            c.c_status_atendimento,
+            c.c_lifetime_value,
+            c.c_lifetime_value_currency,
+            c.c_potencial_venda,
+            c.c_potencial_venda_currency,
+            c.c_qtd_consultas,
+            c.c_ultima_visita,
+            c.created_at,
+            c.modified_at,
+            c.first_name,
+            c.address_street,
+            c.address_city,
+            c.c_delivery_street,
+            c.c_aisummary,
+            pn.name AS phone
+        FROM contact c
+        LEFT JOIN entity_phone_number epn
+            ON epn.entity_id = c.id
+            AND epn.entity_type = 'Contact'
+            AND epn.primary = 1
+            AND epn.deleted = 0
+        LEFT JOIN phone_number pn
+            ON pn.id = epn.phone_number_id
+            AND pn.deleted = 0
+        WHERE c.deleted = 0
+    """
     )
+
     try:
         engine = _mariadb_engine()
         with engine.connect() as conn:
             df = pd.read_sql(query, conn)
-        # Scrub PII from AI-generated free-text field before saving to Parquet
-        df["c_aisummary"] = df["c_aisummary"].fillna("").apply(scrub_pii)
+
+        # Tier 2 only — PII_ALLOWED_FIELDS intentionally skipped
+        for col in FREE_TEXT_FIELDS:
+            if col in df.columns:
+                df[col] = df[col].fillna("").apply(scrub_pii).apply(scrub_pii_presidio)
+
         out_path = BRONZE_PATH / "contact" / f"dt={TODAY}"
         out_path.mkdir(parents=True, exist_ok=True)
         df.to_parquet(out_path / "data.parquet", index=False)
@@ -230,32 +304,15 @@ def export_contacts():
 
 
 def export_rag_audit():
-    """
-    Exports RAG query logs from PostgreSQL for observability and analytics.
-
-    Each row represents one similarity search performed by the Lina AI assistant,
-    covering both institutional knowledge (clinica_docs) and episodic memory
-    (patient_history). Powers the stg_rag_audit and fct_rag_performance dbt models.
-
-    Privacy: query_text is truncated to 500 chars and has passed through
-    _scrub_pii() at write time (retriever_tool.py). patient_id is a
-    SHA-256 hash — never a raw phone number.
-    """
+    """Exports RAG query logs from PostgreSQL. No PII — hashes only."""
     logger.info("[3/3] Exporting rag_audit (PostgreSQL)...")
     query = text(
         """
-        SELECT
-            id,
-            created_at,
-            collection,
-            query_text,
-            k,
-            results_returned,
-            avg_score,
-            patient_id
+        SELECT id, created_at, collection, query_text, query_category,
+               k, results_returned, avg_score, patient_id
         FROM rag_audit
         ORDER BY created_at
-        """
+    """
     )
     try:
         engine = _postgres_engine()
@@ -282,7 +339,7 @@ def main():
     export_contacts()
     export_rag_audit()
     logger.info("=== Bronze export complete ===")
-    logger.info("Next step: python data_lake/silver/silver_transform.py")
+    logger.info("Next step: run pipeline_bronze_silver DAG or dbt manually")
 
 
 if __name__ == "__main__":

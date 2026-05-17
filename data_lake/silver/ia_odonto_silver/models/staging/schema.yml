@@ -95,10 +95,13 @@ models:
       Each row represents one similarity search performed by Lina — either
       against the clinic knowledge base (clinica_docs) or patient episodic
       memory (patient_history). Powers fct_rag_performance for AI observability.
-      Privacy: query_text truncated to 200 chars; patient_id is SHA-256 hash.
+      Deduplication: ROW_NUMBER() over id keeps the most recent record when
+      the same id appears across multiple daily Bronze Parquet partitions.
+      Privacy: query stored as SHA-256 hash (LGPD compliant — raw text never
+      reaches Silver); patient_id is also SHA-256 hash.
     columns:
       - name: id
-        description: Surrogate key from PostgreSQL sequence
+        description: Surrogate key from PostgreSQL sequence — deduplicated
         tests:
           - not_null
           - unique
@@ -124,6 +127,19 @@ models:
           - accepted_values:
               arguments:
                 values: ['knowledge_base', 'episodic_memory', 'unknown']
+      - name: query_hash
+        description: SHA-256 hash of the original query text — LGPD compliant
+        tests:
+          - not_null
+      - name: query_category
+        description: >
+          Inferred intent category written by retriever_tool.py at query time.
+          Examples: scheduling, pricing, procedure, complaint, general.
+          Null for records written before this field was introduced.
+        tests:
+          - not_null:
+              config:
+                severity: warn
       - name: results_returned
         description: Number of chunks actually returned by the similarity search
         tests:

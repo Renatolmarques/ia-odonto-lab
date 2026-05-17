@@ -29,7 +29,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --prefix=/install --no-cache-dir -r requirements.txt
 
-
 # ─────────────────────────────────────────
 # Stage 2: Runner (imagem final)
 # ─────────────────────────────────────────
@@ -48,6 +47,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copiar dependências compiladas do builder
 COPY --from=builder /install /usr/local
+
+# Download spaCy Portuguese model for Presidio NER
+# pt_core_news_lg: large model with NER support (~560MB)
+RUN pip install https://github.com/explosion/spacy-models/releases/download/pt_core_news_lg-3.7.0/pt_core_news_lg-3.7.0-py3-none-any.whl
 
 # Copiar código da aplicação
 COPY app /app/app
