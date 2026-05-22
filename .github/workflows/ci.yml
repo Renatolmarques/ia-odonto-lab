@@ -44,6 +44,7 @@ jobs:
       ESPO_URL: ""
       ESPO_API_KEY: ""
       APP_ENV: test
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout repository
