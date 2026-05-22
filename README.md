@@ -57,7 +57,11 @@ WhatsApp Message
       ↓
 Evolution API (WhatsApp gateway)
       ↓
-n8n Workflow Orchestration
+n8n Webhook Router — filters by event type, fans out in parallel
+  ├── messages.upsert → AI Summary workflow + "Resolved" button workflow
+  └── connection.update → WhatsApp disconnect alert (email)
+      ↓
+n8n AI Summary Workflow
   ├── Debounce buffer (PostgreSQL, 2-min wait)
   ├── GPT-4o-mini (conversation summarization → EspoCRM notes)
   ├── POST /conversations/save  (episodic memory → pgvector)
@@ -86,11 +90,12 @@ EspoCRM REST API (upsert contact + AI fields)
 │  dbt + DuckDB (6 models, 37 tests)          │
 │  PySpark + Delta Lake (Databricks showcase) │
 │         ↓                                   │
-│  Gold (Planned)                             │
-│  PostgreSQL Star Schema (VPS)               │
+│  Gold (Production — VPS)                    │
+│  PostgreSQL Star Schema                     │
 │  Snowflake Star Schema (portfolio showcase) │
 │         ↓                                   │
-│  Metabase Dashboard (Planned)               │
+│  Metabase Dashboard (Production — VPS)      │
+│  LTV · Pipeline · AI ROI · Re-engagement   │
 └──────────────────────────────────────────────┘
 ```
 
@@ -112,9 +117,9 @@ EspoCRM REST API (upsert contact + AI fields)
 | Bronze Layer | Parquet, partitioned by date | Production (VPS) |
 | Silver Layer — SQL | dbt + DuckDB (6 models, 37 tests) | Production (VPS) |
 | Silver Layer — Spark | PySpark + Delta Lake (ACID, time travel) | Portfolio showcase (Databricks) |
+| Gold Layer — DB | PostgreSQL Star Schema | Production (VPS) |
 | Gold Layer — SQL | Star Schema DDL + analytical views | Portfolio showcase (Snowflake) |
-| Gold Layer — DB | PostgreSQL Star Schema | Planned (VPS) |
-| BI Dashboard | Metabase (self-hosted) | Planned (VPS) |
+| BI Dashboard | Metabase (self-hosted) | Production (VPS) |
 | Reverse Proxy | Nginx Proxy Manager + Cloudflare Tunnel | Production (VPS) |
 | Infrastructure | Docker Compose v2 | Production (VPS) |
 | CI/CD | GitHub Actions | Production |
@@ -134,10 +139,13 @@ Each conversation is embedded and stored in a dedicated `patient_history` collec
 Patients rarely send a single message — they send three or four in quick succession. Each incoming message is written to a PostgreSQL buffer. A 2-minute wait node in n8n then checks whether newer messages arrived from the same number. If so, the earlier execution stops — only the latest one continues, reading the full accumulated batch. This prevents the LLM from generating partial summaries on message fragments.
 
 **Apache Airflow over cron — observable, retriable pipelines**
-The Bronze → Silver pipeline runs every 2 hours via a DAG with six sequential tasks: Bronze export, Parquet validation, dbt run, dbt test, 90-day Parquet rotation, and LGPD-compliant message buffer cleanup. Each task has independent retry logic, failure email alerts, and a full execution log in the Airflow UI — replacing fragile cron scripts with a production-grade orchestrator.
+The Bronze → Silver pipeline runs every 2 hours via a DAG with sequential tasks: Bronze export, Parquet validation, dbt run, dbt test, 90-day Parquet rotation, and LGPD-compliant message buffer cleanup. A separate daily DAG handles all infrastructure backups. Each task has independent retry logic, failure email alerts, and a full execution log in the Airflow UI — replacing fragile cron scripts with a production-grade orchestrator.
 
-**n8n webhook routing — one entry point, multiple independent workflows**
-Evolution API supports only one webhook URL per instance. A lightweight router workflow receives every WhatsApp event and fans out in parallel, keeping each downstream workflow focused on a single responsibility.
+**Event-driven webhook routing — one entry point, isolated responsibilities**
+WhatsApp Business API supports only one webhook URL per instance. Rather than handling all event types in a single monolithic workflow, a lightweight router workflow sits at the entry point and dispatches events by type: conversation messages go to the AI Summary workflow and the "Resolved" button workflow simultaneously; connectivity changes go to a dedicated disconnect-alert workflow that emails the clinic if WhatsApp is offline for more than five minutes. Each downstream workflow handles exactly one responsibility and knows nothing about the others. This is the fan-out pattern applied to event-driven automation.
+
+**Adapting to breaking API changes in production — the WhatsApp LID migration**
+WhatsApp silently changed how it identifies contacts in its Business API. Messages that previously arrived with a standard phone number (`+5581999...@s.whatsapp.net`) began arriving with an opaque internal identifier (`182364311425240@lid`) — with no announcement and no migration period. The pipeline failed silently: contacts were not found in the CRM, no data was written, and no error was raised because the workflow completed successfully with an empty result. Debugging required querying the Evolution API database directly to compare raw payload fields across message timestamps and identify that the real phone number had moved to a secondary field (`remoteJidAlt`). The fix was a one-line expression change in the n8n workflow. The lesson: third-party API contracts can change without warning in production systems — the ability to trace a silent failure from symptoms (missing CRM records) back to root cause (payload field rename) is more valuable than the fix itself.
 
 **Two AI layers, complementary not competing**
 n8n runs GPT-4o-mini for fast conversation summarization (`nota_timeline`, `cAisummary` text). Lina runs independently for semantic enrichment (`cPotencialVenda`, `cQtdConsultas`, intent classification). Field ownership is enforced: neither system overwrites the other's CRM fields.
@@ -148,8 +156,11 @@ Transformations are dbt SQL models versioned in Git with automated tests (`not_n
 **Production tooling vs portfolio tooling — a deliberate choice**
 The VPS runs Parquet + DuckDB + dbt: zero licensing cost, no Spark dependency, sustainable on a $7/month server. The Databricks notebook and Snowflake schema demonstrate the same pipeline decisions applied at enterprise scale — Delta Lake for ACID guarantees and time travel, Snowflake for a columnar warehouse with Star Schema. Both tracks are in this repository.
 
+**Automated daily security scanning — treating infrastructure as observable**
+A dedicated Airflow DAG runs every night and performs eight security checks against the live VPS: scanning for suspicious executables in temporary directories, known malware process names, outbound connections to cryptocurrency mining pool ports, Docker containers with ports accidentally exposed to the internet, unauthorized crontab modifications, unexpected SSH logins, and CPU/disk anomalies. Results are aggregated and an email alert is sent only when a problem is found — zero noise on clean nights. This DAG was built directly from the incident response checklist used when the VPS was previously compromised by a cryptominer, turning a manual recovery procedure into an automated early-warning system.
+
 **Production-grade security**
-All services run behind a Cloudflare Tunnel — the VPS origin IP is never exposed. Docker ports are bound to `127.0.0.1` only (Docker bypasses UFW iptables rules; loopback binding is the correct mitigation). Fail2Ban active with escalating bans up to 720h. Cloudflare Access (email OTP) gates the n8n, EspoCRM, and Evolution API panels. All external traffic reaches the stack exclusively through Cloudflare-proxied domains with HTTPS.
+All services run behind a Cloudflare Tunnel — the VPS origin IP is never exposed. Docker ports are bound to `127.0.0.1` only (Docker bypasses UFW iptables rules; loopback binding is the correct mitigation). Fail2Ban active with escalating bans up to 720h. Cloudflare Access (email OTP) gates five admin panels: Airflow, Metabase, n8n, EspoCRM, and Evolution API. SSH login alerts fire via email on every successful authentication. All external traffic reaches the stack exclusively through Cloudflare-proxied domains with HTTPS.
 
 ---
 
@@ -175,7 +186,9 @@ ia-odonto-lab/
 │       └── ingest_knowledge.py      # Knowledge base ingestion pipeline
 ├── dags/
 │   ├── pipeline_bronze_silver.py    # Airflow DAG: Bronze export → validate → dbt → rotate → cleanup
-│   └── pipeline_backups.py          # Airflow DAG: n8n workflow + infrastructure backup to GitHub
+│   ├── pipeline_gold.py             # Airflow DAG: Silver → PostgreSQL Gold Star Schema
+│   ├── pipeline_backups.py          # Airflow DAG: MariaDB + PostgreSQL backups → GitHub + 90-day Parquet rotation
+│   └── pipeline_security_scan.py   # Airflow DAG: daily VPS security scan — malware, ports, SSH, CPU
 ├── data_lake/
 │   ├── bronze/
 │   │   └── export_bronze.py         # MariaDB + PostgreSQL → Parquet (partitioned by date, PII scrubbed)
@@ -183,7 +196,8 @@ ia-odonto-lab/
 │   │   ├── ia_odonto_silver/        # dbt project (6 models, 37 tests, DuckDB)
 │   │   └── databricks_notebook.ipynb  # PySpark: Bronze → Silver Delta Lake, SHA-256, time travel
 │   └── gold/
-│       └── gold_schema.sql          # Snowflake Star Schema DDL + analytical views
+│       ├── gold_schema.sql          # Snowflake Star Schema DDL + analytical views
+│       └── load_gold_vps.py         # Silver DuckDB → PostgreSQL Gold (production loader)
 ├── scripts/
 │   ├── dbt_run.sh                   # dbt runner for local development
 │   └── dbt_run_vps.sh               # dbt runner for VPS execution
@@ -212,6 +226,7 @@ WhatsApp Conversations        MariaDB (EspoCRM billing)      PostgreSQL (RAG aud
     Bronze Layer ──────────────── Bronze Layer ──────────────── Bronze Layer
   Parquet, partitioned           Parquet, partitioned           Parquet, partitioned
   dt=YYYY-MM-DD/                 dt=YYYY-MM-DD/                 dt=YYYY-MM-DD/
+  90-day retention               90-day retention               90-day retention
          ↓                             ↓                              ↓
          └─────────────────────────────┴──────────────────────────────┘
                                        ↓
@@ -228,20 +243,25 @@ WhatsApp Conversations        MariaDB (EspoCRM billing)      PostgreSQL (RAG aud
                          Delta Lake: ACID + time travel
                          Same transformations, enterprise scale
                                        ↓
-                              Gold Layer (Planned)
-                         PostgreSQL Star Schema (VPS production)
-                         Snowflake Star Schema (portfolio showcase)
+                              Gold Layer (Production — VPS)
+                         PostgreSQL Star Schema
                          FACT_INTERACTIONS, DIM_PATIENTS (anonymized)
                          DIM_SERVICES, DIM_DATE
+                         Analytical views: AI ROI, LTV, Pipeline, Re-engagement
                                        ↓
-                         Metabase Dashboard (Planned)
+                         Gold Layer (Portfolio Showcase)
+                         Snowflake Star Schema DDL
+                                       ↓
+                         Metabase Dashboard (Production — VPS)
                     LTV by period · Conversion by intent
                     Re-engagement opportunities · AI ROI
 ```
 
-**Airflow orchestrates the full pipeline every 2 hours:**
+**Airflow orchestrates the full pipeline:**
 ```
-export_bronze → validate_parquet → dbt_run → dbt_test → rotate_parquet → cleanup_buffer
+Every 2h:  export_bronze → validate_parquet → dbt_run → dbt_test → rotate_parquet → cleanup_buffer
+Daily 3h:  backup_mariadb + backup_postgres → backup_infra_github → cleanup (SQL, Parquet, logs, Docker)
+Daily 3:30h: security_scan (8 checks) → alert if issues found
 ```
 Each task: independent retry (×2), failure email alert, full execution log in Airflow UI.
 
@@ -333,8 +353,9 @@ Notes: Known allergy to domperidone, needle anxiety on record."
 - Episodic memory keyed by SHA-256 hash of phone number — original never stored
 - Patient PII masked at Silver layer via SHA-256 hashing before any persistence
 - 8-pattern regex scrubber (CPF, CNPJ, credit cards, phones, emails, PIX keys, RG, postal codes)
+- Microsoft Presidio NER for name and address detection beyond regex patterns
 - Message buffer cleaned automatically every 30 days (Airflow `cleanup_buffer` task)
-- Bronze Parquet rotated after 90 days (Airflow `rotate_parquet` task)
+- Bronze Parquet rotated after 90 days (Airflow `cleanup_bronze_parquet` task)
 - Lina operates on conversation text delivered by n8n — never queries patient databases directly
 
 ---
@@ -352,6 +373,7 @@ black, isort, flake8             ia_mariadb     (EspoCRM billing, 127.0.0.1:3306
                                  ia_n8n         (workflow orchestration, 127.0.0.1:5678)
                                  ia_evolution   (WhatsApp gateway, 127.0.0.1:8081)
                                  ia_airflow     (pipeline orchestration, 127.0.0.1:8082)
+                                 ia_metabase    (BI dashboard, 127.0.0.1:3000)
                                  ia_postgres    (Evolution + buffer DB)
                                  ia_redis       (cache)
                                  nginx-proxy-manager
@@ -361,7 +383,9 @@ black, isort, flake8             ia_mariadb     (EspoCRM billing, 127.0.0.1:3306
                                  All Docker ports → 127.0.0.1 only
                                  Docker bypasses UFW — loopback binding is the mitigation
                                  Fail2Ban (4 jails, escalating bans up to 720h)
-                                 Cloudflare Access (email OTP) on admin panels
+                                 Cloudflare Access (email OTP) on 5 admin panels
+                                 SSH login alert via email on every successful authentication
+                                 Daily automated security scan (Airflow DAG)
 ```
 
 ---
@@ -380,9 +404,9 @@ black, isort, flake8             ia_mariadb     (EspoCRM billing, 127.0.0.1:3306
 | 5D | ✅ | Security — Cloudflare Tunnel + Fail2Ban + Docker network isolation |
 | 6 | ✅ | Airflow orchestration — full pipeline DAG (6 tasks, retry, alerts) |
 | 7 | ✅ | Episodic Memory — pgvector patient_history, SHA-256 keyed, validated in production |
-| 8 | ⬜ | Gold Layer — PostgreSQL Star Schema (VPS) + Metabase dashboard |
-| 9 | ⬜ | NER — Microsoft Presidio for name/address PII detection |
-| 10 | ⬜ | Fine-tuning showcase — synthetic JSONL + gpt-4o-mini |
+| 8 | ✅ | Gold Layer — PostgreSQL Star Schema (VPS) + Metabase dashboard (production) |
+| 9 | ✅ | NER — Microsoft Presidio for name/address PII detection |
+| 10 | ✅ | Security hardening — Cloudflare Access (5 panels) + daily security scan DAG + SSH login alerts |
 
 ---
 

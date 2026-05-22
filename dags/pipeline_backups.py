@@ -38,6 +38,7 @@ Stages:
   t_cleanup_app_logs     (independent, parallel)
   t_cleanup_n8n          (independent, parallel)
   t_cleanup_docker       (independent, parallel)
+  t_cleanup_parquet      (independent, parallel) — Bronze Parquet partitions > 90 days
 
 On failure: sends alert via n8n webhook → Gmail.
 
@@ -71,6 +72,9 @@ DEFAULT_ARGS = {
 
 # Backup destination — writable by Airflow user (uid 50000)
 BACKUP_PATH = "/opt/ia-odonto-lab/backups"
+
+# Bronze data lake path — Parquet partitions exported daily by export_bronze.py
+BRONZE_PATH = "/opt/ia-odonto-lab/data_lake/bronze"
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +276,27 @@ CLEANUP_N8N_BACKUPS_CMD = (
 CLEANUP_DOCKER_SYSTEM_CMD = "docker system prune -f && " "echo 'Docker system pruned.'"
 
 # ---------------------------------------------------------------------------
+# Task: Cleanup Bronze Parquet partitions older than 90 days
+#
+# export_bronze.py runs daily at 02:00 and writes partitioned Parquet files:
+#   /opt/ia-odonto-lab/data_lake/bronze/{table}/dt=YYYY-MM-DD/data.parquet
+#
+# Retention policy: keep last 90 days (3 months of raw data).
+# Silver and Gold layers already consolidate this data, so older Bronze
+# partitions are redundant. Without cleanup, partitions accumulate indefinitely.
+#
+# Uses -mtime +90 on directories named dt=* to target only date partitions.
+# The || true ensures the task never fails if no partitions are found.
+# ---------------------------------------------------------------------------
+CLEANUP_PARQUET_CMD = (
+    f"find {BRONZE_PATH} -type d -name 'dt=*' -mtime +90 "
+    "-exec rm -rf {} + 2>/dev/null || true && "
+    f"echo 'Bronze Parquet partitions older than 90 days cleaned up.' && "
+    f"find {BRONZE_PATH} -type d -name 'dt=*' | wc -l | "
+    "xargs -I{} echo 'Remaining partitions: {}'"
+)
+
+# ---------------------------------------------------------------------------
 # DAG definition
 # ---------------------------------------------------------------------------
 with DAG(
@@ -375,6 +400,13 @@ with DAG(
         on_failure_callback=_on_failure_callback,
     )
 
+    t_cleanup_parquet = BashOperator(
+        task_id="cleanup_bronze_parquet",
+        bash_command=CLEANUP_PARQUET_CMD,
+        execution_timeout=timedelta(minutes=5),
+        on_failure_callback=_on_failure_callback,
+    )
+
     # Backup chain: MariaDB + Postgres (parallel) → Infra → Cleanup old backups
     [t_mariadb, t_postgres] >> t_infra >> t_cleanup
 
@@ -388,3 +420,4 @@ with DAG(
     t_cleanup_app_logs
     t_cleanup_n8n
     t_cleanup_docker
+    t_cleanup_parquet
