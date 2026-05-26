@@ -7,6 +7,13 @@ ResumoClinico  : structured clinical output written to EspoCRM
 
 Using Pydantic v2 with strict validation ensures the LLM output
 always matches the CRM schema — no regex parsing, no hallucinated fields.
+
+Sprint 1 additions:
+  origem_lead           → cCOrigemLead   (lead source classification)
+  procedimento_interesse → cCProcedimentoInteresse (procedure of interest)
+  fobia_dentaria        → cCFobiasDentarias (dental fears/phobias)
+  intencao_principal    → cCLinaIntencaoPrincipal (fine-grained intent)
+  etapa_funil_sugerida  → cCEtapaFunil (suggested funnel stage)
 """
 import re
 from typing import Literal, Optional
@@ -48,21 +55,31 @@ class ResumoClinico(BaseModel):
     type-safe, validated output without any post-processing.
 
     Field → EspoCRM mapping:
-      cliente         → firstName + lastName
-      intencao        → cIntencao (intent classification)
-      potencial       → cPotencialVenda (estimated deal value)
-      qtd_consultas   → cQtdConsultas
-      historico       → part of cAisummary (main CRM field)
+      cliente              → firstName + lastName
+      intencao             → cIntencao (legacy intent classification)
+      potencial            → cPotencialVenda (estimated deal value)
+      qtd_consultas        → cQtdConsultas
+      historico            → part of cAisummary (main CRM field)
+      origem_lead          → cCOrigemLead
+      procedimento_interesse → cCProcedimentoInteresse
+      fobia_dentaria       → cCFobiasDentarias
+      intencao_principal   → cCLinaIntencaoPrincipal
+      etapa_funil_sugerida → cCEtapaFunil
+
+    Note on EspoCRM field naming: custom fields created with prefix 'c'
+    are stored by EspoCRM with a doubled prefix 'cC' (e.g. cOrigemLead → cCOrigemLead).
+    All API payloads must use the 'cC' prefix.
 
     Language note:
       - Default values and CRM output are in Portuguese (patient-facing).
       - Internal field names and descriptions remain in English (CV/showcase).
     """
 
-    # Defaults in Portuguese — these appear in EspoCRM when the LLM cannot extract data
+    # ── Legacy fields (unchanged) ──────────────────────────────────────────
     cliente: str = Field(default="Não identificado", description="Patient full name")
     intencao: Literal["Consulta", "Agendamento", "Reclamação", "Outro"] = Field(
-        default="Outro", description="Conversation intent"
+        default="Outro",
+        description="Conversation intent (legacy, kept for compatibility)",
     )
     solicitacao: str = Field(
         default="Não identificada", description="What the patient is asking for"
@@ -88,6 +105,73 @@ class ResumoClinico(BaseModel):
         description="Chronological interaction summary",
     )
 
+    # ── Sprint 1: lead source, funnel stage, fine-grained intent ──────────
+    origem_lead: Literal[
+        "instagram",
+        "google",
+        "indicacao",
+        "anuncio_pago",
+        "material_fisico",
+        "nao_identificada",
+    ] = Field(
+        default="nao_identificada",
+        description=(
+            "Lead acquisition channel. Inferred from conversation text or UTM param. "
+            "Maps to cCOrigemLead in EspoCRM."
+        ),
+    )
+
+    procedimento_interesse: Optional[str] = Field(
+        default=None,
+        description=(
+            "Dental procedure the patient mentioned interest in. "
+            "E.g. 'clareamento', 'implante', 'aparelho'. "
+            "Maps to cCProcedimentoInteresse in EspoCRM."
+        ),
+    )
+
+    fobia_dentaria: Optional[str] = Field(
+        default=None,
+        description=(
+            "Any fear, phobia or anxiety about dental treatment mentioned by the patient. "
+            "E.g. 'medo de agulha', 'trauma com dentista'. "
+            "Maps to cCFobiasDentarias in EspoCRM."
+        ),
+    )
+
+    intencao_principal: Literal[
+        "inquiry",
+        "scheduling",
+        "confirmation",
+        "cancellation",
+        "rescheduling",
+        "question",
+        "ambiguous",
+    ] = Field(
+        default="inquiry",
+        description=(
+            "Fine-grained intent classification. More specific than the legacy 'intencao' field. "
+            "Maps to cCLinaIntencaoPrincipal in EspoCRM."
+        ),
+    )
+
+    etapa_funil_sugerida: Literal[
+        "lead_novo",
+        "lead_qualificado",
+        "orcamento_enviado",
+        "consulta_agendada",
+        "consulta_realizada",
+        "tratamento_andamento",
+        "paciente_ativo",
+        "perdido",
+    ] = Field(
+        default="lead_novo",
+        description=(
+            "Suggested CRM funnel stage based on conversation analysis. "
+            "Maps to cCEtapaFunil in EspoCRM."
+        ),
+    )
+
     @staticmethod
     def _mask_pii(text: str) -> str:
         """
@@ -97,9 +181,7 @@ class ResumoClinico(BaseModel):
           CPF:   123.456.789-00  →  ***.***.***-**
           CNPJ:  12.345.678/0001-90  →  **.***.***/****-**
         """
-        # Mask CPF pattern: 000.000.000-00
         text = re.sub(r"\d{3}\.\d{3}\.\d{3}-\d{2}", "***.***.***-**", text)
-        # Mask CNPJ pattern: 00.000.000/0000-00
         text = re.sub(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", "**.***.***/****-**", text)
         return text
 
@@ -121,5 +203,8 @@ class ResumoClinico(BaseModel):
             f"- Solicitação: {self.solicitacao}\n"
             f"- Observações: {obs_limpo}\n"
             f"- Potencial estimado: R$ {self.potencial:.2f}\n"
-            f"- Qtd. consultas: {self.qtd_consultas}"
+            f"- Qtd. consultas: {self.qtd_consultas}\n"
+            f"- Origem: {self.origem_lead}\n"
+            f"- Procedimento de interesse: {self.procedimento_interesse or 'Não identificado'}\n"
+            f"- Etapa do funil: {self.etapa_funil_sugerida}"
         )

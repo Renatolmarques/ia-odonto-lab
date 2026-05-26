@@ -14,6 +14,13 @@ Pipeline:
   4. Invoke GPT-4o-mini with structured output (Pydantic ResumoClinico)
   5. Return typed model ready for EspoCRM upsert
 
+Sprint 1 additions:
+  - Lead source classification (origem_lead) from conversation text or UTM param
+  - Dental procedure extraction (procedimento_interesse)
+  - Dental fear/phobia extraction (fobia_dentaria)
+  - Fine-grained intent classification (intencao_principal)
+  - Funnel stage suggestion (etapa_funil_sugerida)
+
 LGPD compliance: pgvector contains ONLY institutional knowledge (clinica_docs)
                  and hashed conversation summaries (patient_history).
                  Raw patient PII never enters the vector database.
@@ -108,7 +115,7 @@ Todos os campos de texto devem ser preenchidos em PORTUGUÊS BRASILEIRO.
 
 {name_hint}
 
-REGRAS
+REGRAS GERAIS
 1. NUNCA invente dados. Use os valores padrão se a informação não puder ser extraída.
 2. NUNCA faça diagnósticos médicos.
 3. NUNCA inclua CPF, RG, senhas ou números de documentos na saída.
@@ -117,6 +124,68 @@ REGRAS
 6. 'ltv_pago': preencha apenas se o paciente mencionou pagamentos passados explicitamente.
 7. 'fobias_alergias': capture qualquer menção a medo, fobia ou alergia.
 8. Se houver histórico do paciente abaixo, use-o para enriquecer o resumo — não ignore.
+
+CLASSIFICAÇÃO DE ORIGEM DO LEAD (campo: origem_lead)
+Analise o texto da conversa e classifique a origem usando estas regras:
+- Mencionou "Instagram", "Insta", "post", "story", "reel", "feed", "perfil"
+  → "instagram"
+- Mencionou "Google", "Maps", "pesquisei", "achei no site", "no mapa", "busquei"
+  → "google"
+- Mencionou "indicação", "amigo indicou", "fulano falou", "me indicaram", "recomendação"
+  → "indicacao"
+- Mencionou "anúncio", "vi um anúncio", "propaganda", "patrocinado", "publicidade"
+  → "anuncio_pago"
+- Mencionou "cartão", "QR code", "flyer", "impresso", "panfleto"
+  → "material_fisico"
+- Primeira mensagem começa com "Vim pelo Instagram", "Vim pelo Google" (UTM param)
+  → usar o canal correspondente acima
+- Nenhuma indicação clara de origem
+  → "nao_identificada"
+
+CLASSIFICAÇÃO DE INTENÇÃO PRINCIPAL (campo: intencao_principal)
+- Paciente fazendo perguntas gerais sobre serviços, preços, localização
+  → "inquiry"
+- Paciente pedindo para marcar, agendar ou confirmar horário
+  → "scheduling"
+- Paciente confirmando consulta já agendada
+  → "confirmation"
+- Paciente cancelando consulta
+  → "cancellation"
+- Paciente pedindo para remarcar ou trocar horário
+  → "rescheduling"
+- Paciente fazendo pergunta técnica sobre procedimento ou pós-operatório
+  → "question"
+- Intenção não clara ou mista
+  → "ambiguous"
+
+EXTRAÇÃO DE PROCEDIMENTO DE INTERESSE (campo: procedimento_interesse)
+Se o paciente mencionou qualquer procedimento odontológico, extraia o nome em português.
+Exemplos: "clareamento", "implante", "limpeza", "aparelho", "canal", "faceta", "extração".
+Se não mencionou nenhum procedimento, retorne null.
+
+EXTRAÇÃO DE FOBIA DENTÁRIA (campo: fobia_dentaria)
+Se o paciente mencionou medo, ansiedade, trauma ou fobia relacionada a tratamento dentário,
+descreva brevemente em português. Exemplos: "medo de agulha", "ansiedade com barulho do motor",
+"trauma com dentista anterior". Se não mencionou, retorne null.
+
+SUGESTÃO DE ETAPA DO FUNIL (campo: etapa_funil_sugerida)
+Com base na conversa completa, sugira a etapa mais adequada:
+- Paciente nunca foi à clínica, só perguntando
+  → "lead_novo"
+- Paciente demonstrou interesse real, perguntou preço ou disponibilidade
+  → "lead_qualificado"
+- Paciente pediu orçamento detalhado
+  → "orcamento_enviado"
+- Paciente agendou ou está tentando agendar consulta
+  → "consulta_agendada"
+- Paciente mencionou que já foi à consulta recentemente
+  → "consulta_realizada"
+- Paciente está em tratamento ativo (múltiplas sessões mencionadas)
+  → "tratamento_andamento"
+- Paciente recorrente, retornando para manutenção
+  → "paciente_ativo"
+- Paciente cancelou, sumiu ou demonstrou desistência clara
+  → "perdido"
 
 {_build_rag_block(retrieved_context)}
 {_build_history_block(history)}
@@ -135,8 +204,10 @@ RETORNE APENAS O JSON ESTRUTURADO. Nenhum texto fora do JSON.
     resumo: ResumoClinico = llm.with_structured_output(ResumoClinico).invoke(messages)
 
     logger.info(
-        "✅ Intent: %s | Estimated potential: R$ %.2f",
-        resumo.intencao,
+        "✅ Intent: %s | Funnel: %s | Source: %s | Estimated potential: R$ %.2f",
+        resumo.intencao_principal,
+        resumo.etapa_funil_sugerida,
+        resumo.origem_lead,
         resumo.potencial,
     )
     return resumo

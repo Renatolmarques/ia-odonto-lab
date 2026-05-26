@@ -8,8 +8,18 @@ Handles Contact upsert via EspoCRM REST API:
   3. If not found: create new contact with status "New Lead"
 
 Responsibility boundaries (do NOT overwrite fields owned by other systems):
-  THIS SERVICE writes: cAisummary, cPotencialVenda, cQtdConsultas, cDisplayPotencial
-  n8n WORKFLOW writes: cLifetimeValue, cCKanbanCard, cCUltimoRecebimento (from billing DB)
+  THIS SERVICE writes:
+    cAisummary, cPotencialVenda, cQtdConsultas, cDisplayPotencial  (legacy)
+    cCOrigemLead, cCProcedimentoInteresse, cCFobiasDentarias        (Sprint 1)
+    cCLinaIntencaoPrincipal, cCEtapaFunil                          (Sprint 1)
+
+  n8n WORKFLOW writes:
+    cLifetimeValue, cCKanbanCard, cCUltimoRecebimento (from billing DB)
+    cCDiasUltimaInteracao, cCStatusRisco              (recalculated daily)
+
+Note on EspoCRM field naming:
+  Custom fields created with prefix 'c' are stored by EspoCRM with a doubled
+  prefix 'cC' (e.g. cOrigemLead → cCOrigemLead). All API payloads use 'cC'.
 """
 import logging
 import os
@@ -45,6 +55,25 @@ def _format_potential_display(value: float) -> str:
     return f"\U0001f680 Potential: R$ {formatted}"
 
 
+def _build_sprint1_payload(resumo: ResumoClinico) -> Dict[str, Any]:
+    """
+    Builds the Sprint 1 fields payload for EspoCRM API.
+    Only includes fields with actual values — avoids overwriting with nulls.
+    Uses the doubled 'cC' prefix required by EspoCRM custom field naming.
+    """
+    payload: Dict[str, Any] = {
+        "cCOrigemLead": resumo.origem_lead,
+        "cCLinaIntencaoPrincipal": resumo.intencao_principal,
+        "cCEtapaFunil": resumo.etapa_funil_sugerida,
+    }
+    # Only write optional fields if Lina actually extracted a value
+    if resumo.procedimento_interesse:
+        payload["cCProcedimentoInteresse"] = resumo.procedimento_interesse
+    if resumo.fobia_dentaria:
+        payload["cCFobiasDentarias"] = resumo.fobia_dentaria
+    return payload
+
+
 async def _search_contact_by_phone(phone: str) -> Optional[str]:
     """
     Searches EspoCRM for a contact by phone using LIKE query.
@@ -72,23 +101,30 @@ async def _search_contact_by_phone(phone: str) -> Optional[str]:
 
 
 async def _create_contact(phone: str, resumo: ResumoClinico) -> Dict[str, Any]:
-    """Creates a new CRM contact with AI summary and estimated deal value."""
+    """
+    Creates a new CRM contact with AI summary, estimated fields,
+    and Sprint 1 lead intelligence fields.
+    """
     parts = (
         resumo.cliente.split(" ")
         if resumo.cliente != "Not identified"
         else ["Patient", "."]
     )
     payload = {
+        # Identity
         "firstName": parts[0],
         "lastName": " ".join(parts[1:]) if len(parts) > 1 else ".",
         "phoneNumber": phone,
         "cStatusAtendimento": "Novo Lead",
+        # Legacy AI fields
         "cAisummary": resumo.formatar_para_crm(),
         "cPotencialVenda": resumo.potencial,
         "cPotencialVendaCurrency": "BRL",
         "cQtdConsultas": resumo.qtd_consultas,
         "cDisplayPotencial": _format_potential_display(resumo.potencial),
         "cDisplayVisitas": f"\U0001f3e5 Visits: {resumo.qtd_consultas}",
+        # Sprint 1: lead intelligence fields
+        **_build_sprint1_payload(resumo),
     }
     async with httpx.AsyncClient(timeout=ESPO_TIMEOUT) as client:
         response = await client.post(
@@ -103,14 +139,21 @@ async def _create_contact(phone: str, resumo: ResumoClinico) -> Dict[str, Any]:
 
 
 async def _update_contact(contact_id: str, resumo: ResumoClinico) -> Dict[str, Any]:
-    """Updates AI-owned fields on an existing contact. Does not touch LTV or Kanban fields."""
+    """
+    Updates AI-owned fields on an existing contact.
+    Does not touch LTV, Kanban, or n8n-owned fields.
+    Includes Sprint 1 lead intelligence fields on every update.
+    """
     payload = {
+        # Legacy AI fields
         "cAisummary": resumo.formatar_para_crm(),
         "cPotencialVenda": resumo.potencial,
         "cPotencialVendaCurrency": "BRL",
         "cQtdConsultas": resumo.qtd_consultas,
         "cDisplayPotencial": _format_potential_display(resumo.potencial),
         "cDisplayVisitas": f"\U0001f3e5 Visits: {resumo.qtd_consultas}",
+        # Sprint 1: lead intelligence fields
+        **_build_sprint1_payload(resumo),
     }
     if resumo.cliente and resumo.cliente != "Not identified":
         parts = resumo.cliente.split(" ")
