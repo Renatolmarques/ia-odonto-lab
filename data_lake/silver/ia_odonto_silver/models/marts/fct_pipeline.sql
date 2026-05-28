@@ -3,6 +3,9 @@
 -- Joins stg_contacts and stg_recebimentos via contato_hash
 -- Key metric for clinic funnel and re-engagement analysis
 --
+-- Sprint 2 enrichment: etapa_funil, status_risco, origem_lead from stg_contacts
+-- are now surfaced here to power the weekly email and Gold dim_patients.
+--
 -- Fix: explicit DECIMAL(13,2) casts on all financial columns to prevent
 -- DuckDB type binding errors when mixing DOUBLE (from sum/round) with
 -- DECIMAL(13,2) (from stg_contacts). The QUALIFY clause in stg_contacts
@@ -28,8 +31,18 @@ billing_agg as (
 pipeline as (
     select
         c.contato_hash,
-        -- care status
+        -- care status (pre-Sprint 1 field, kept for backwards compatibility)
         c.status_atendimento,
+        -- Sprint 1 funnel fields — NULL for contacts created before Sprint 1
+        c.etapa_funil,
+        c.status_risco,
+        c.origem_lead,
+        c.intencao_principal,
+        c.procedimento_interesse,
+        c.ctwa_clid,
+        c.anuncio_origem,
+        c.dias_ultima_interacao,
+        c.ltv_total                                    as ltv_total_lina,
         -- financial profile
         c.lifetime_value,
         c.lifetime_value_moeda,
@@ -49,7 +62,9 @@ pipeline as (
             else null
         end                                                    as dias_desde_ultima_visita,
         -- pipeline classification
+        -- Uses status_risco (Sprint 1) when available; falls back to legacy logic.
         case
+            when c.status_risco is not null then c.status_risco
             when c.status_atendimento = 'finalizado'
                 and coalesce(b.total_pago, cast(0 as decimal(13,2))) = cast(0 as decimal(13,2))
                 then 'churned'

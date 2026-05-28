@@ -37,8 +37,11 @@ models:
   - name: stg_contacts
     description: >
       Staging model for contact analytical fields from EspoCRM MariaDB.
-      No PII — only behavioral and financial metrics.
+      Passes through PII fields (nome, telefone, bairro, cidade, endereco_entrega)
+      under LGPD legitimate interest for clinical identification.
       Anonymizes contact id with SHA-256 + salt (LGPD compliant).
+      Sprint 2: includes 9 Sprint 1 analytical fields (c_c_* prefix).
+      Excluded: c_c_fobias_dentarias (LGPD Art. 11 — health data).
     columns:
       - name: contato_hash
         description: SHA-256 hash of contact id with salt — LGPD compliant
@@ -65,6 +68,48 @@ models:
         description: Total visit count — integer >= 0
         tests:
           - not_null
+      - name: etapa_funil
+        description: >
+          Funnel stage written by Lina (Sprint 1). Null for contacts created
+          before Sprint 1 deployment. Values: lead_novo, em_contato,
+          orcamento_enviado, consulta_agendada, em_tratamento, finalizado.
+        tests:
+          - not_null:
+              config:
+                severity: warn
+      - name: status_risco
+        description: >
+          Re-engagement risk tier calculated by n8n workflow (Sprint 1).
+          Null for contacts without interaction history.
+          Values: ativo (0-180d), em_risco (181-365d), perdido (366d+).
+        tests:
+          - not_null:
+              config:
+                severity: warn
+      - name: origem_lead
+        description: >
+          Lead origin channel identified by Lina (Sprint 1).
+          Examples: instagram, google, indicacao, anuncio_pago, nao_identificada.
+        tests:
+          - not_null:
+              config:
+                severity: warn
+      - name: intencao_principal
+        description: >
+          Primary intent inferred by Lina from WhatsApp conversation (Sprint 1).
+          Examples: agendamento, orcamento, duvida, reclamacao.
+        tests:
+          - not_null:
+              config:
+                severity: warn
+      - name: procedimento_interesse
+        description: >
+          Dental procedure of interest identified by Lina (Sprint 1).
+          Examples: implante, clareamento, ortodontia, limpeza.
+        tests:
+          - not_null:
+              config:
+                severity: warn
 
   - name: stg_ai_summaries
     description: >
@@ -146,5 +191,56 @@ models:
           - not_null
       - name: is_low_quality
         description: True if no results returned or avg_score below 0.5
+        tests:
+          - not_null
+
+  - name: stg_opportunities
+    description: >
+      Staging model for opportunity data from EspoCRM MariaDB.
+      Each row represents one treatment plan for a patient.
+      Architectural decision (2026-05-28): no Consulta entity in EspoCRM.
+      Each treatment = 1 Opportunity. Individual sessions are Stream notes.
+      Anonymizes opportunity id and contact_id with SHA-256 + salt (LGPD compliant).
+      contact_id is hashed to contato_hash to enable joins with stg_contacts
+      and dim_patients without exposing raw EspoCRM UUIDs.
+    columns:
+      - name: opportunity_hash
+        description: SHA-256 hash of opportunity id with salt — LGPD compliant
+        tests:
+          - not_null
+          - unique
+      - name: contato_hash
+        description: >
+          SHA-256 hash of contact_id with salt — matches stg_contacts.contato_hash.
+          Used as FK to dim_patients in Gold layer.
+        tests:
+          - not_null
+      - name: stage
+        description: >
+          Treatment stage normalized to lowercase — mirrors EspoCRM Opportunity stage.
+          Examples: prospecting, qualificado, orcamento_enviado, consulta_agendada,
+          em_tratamento, ganho, perdido.
+        tests:
+          - not_null:
+              config:
+                severity: warn
+      - name: valor
+        description: Treatment value in BRL — decimal(13,2). Zero if not yet defined.
+        tests:
+          - not_null:
+              config:
+                severity: warn
+      - name: probabilidade
+        description: Closing probability 0-100 as set in EspoCRM
+        tests:
+          - not_null:
+              config:
+                severity: warn
+      - name: created_at
+        description: Date the opportunity was created in EspoCRM
+        tests:
+          - not_null
+      - name: modified_at
+        description: Date of last modification — used for deduplication
         tests:
           - not_null

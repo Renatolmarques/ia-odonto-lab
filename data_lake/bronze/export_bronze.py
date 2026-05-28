@@ -13,13 +13,15 @@ Two-layer PII defense:
              addresses) that regex cannot catch. Requires spaCy pt model.
 
 Sources:
-  1. MariaDB (EspoCRM billing) → c_recebimento table → Parquet
-  2. MariaDB (EspoCRM CRM)     → contact table       → Parquet
-  3. PostgreSQL (pgvector)     → RAG audit data      → Parquet
+  1. MariaDB (EspoCRM billing) → c_recebimento table   → Parquet
+  2. MariaDB (EspoCRM CRM)     → contact table         → Parquet
+  3. MariaDB (EspoCRM CRM)     → opportunity table     → Parquet  [Sprint 2]
+  4. PostgreSQL (pgvector)     → RAG audit data        → Parquet
 
 Output structure (Hive-style partitioning):
   data_lake/bronze/c_recebimento/dt=YYYY-MM-DD/data.parquet
   data_lake/bronze/contact/dt=YYYY-MM-DD/data.parquet
+  data_lake/bronze/opportunity/dt=YYYY-MM-DD/data.parquet
   data_lake/bronze/rag_audit/dt=YYYY-MM-DD/data.parquet
 
 Usage:
@@ -37,6 +39,15 @@ EspoCRM schema notes (confirmed via SHOW COLUMNS 2026-05-17):
   address_street      varchar(255)  — Bairro (native field)
   address_city        varchar(100)  — Cidade (native field)
   c_delivery_street   mediumtext    — Nome da Rua e Número (custom field)
+
+EspoCRM custom field naming convention (confirmed 2026-05-27):
+  EspoCRM doubles the 'c' prefix — a field created as 'cOrigemLead' becomes
+  'cCOrigemLead' in the UI and 'c_c_origem_lead' in MariaDB snake_case.
+  All Sprint 1 custom fields follow this c_c_ prefix pattern in the DB.
+
+LGPD field policy for Sprint 1 fields:
+  c_c_fobias_dentarias is health data (LGPD Art. 11) — NOT exported.
+  All other Sprint 1 fields are analytical (no PII) — exported to Gold.
 """
 import logging
 import os
@@ -89,6 +100,10 @@ BRONZE_PATH = Path(__file__).parent
 # ---------------------------------------------------------------------------
 # Contact field policy — three explicit tiers.
 #
+# Sprint 1 added 10 new custom fields to EspoCRM Contact. Nine are exported
+# here (all analytical). The tenth — c_c_fobias_dentarias — is health data
+# under LGPD Art. 11 and intentionally excluded from Bronze/Silver/Gold.
+#
 # To add a new field:
 #   - Liberated PII: add to PII_ALLOWED_FIELDS + SQL query
 #   - AI free text:  add to FREE_TEXT_FIELDS + SQL query
@@ -112,6 +127,8 @@ FREE_TEXT_FIELDS = [
 ]
 
 # Tier 3 — Pure analytical. No scrubbing.
+# Sprint 1 adds 9 new fields (c_c_* prefix = EspoCRM doubles the 'c').
+# c_c_fobias_dentarias intentionally excluded — LGPD Art. 11 health data.
 ANALYTICAL_FIELDS = [
     "id",
     "c_status_atendimento",
@@ -121,6 +138,34 @@ ANALYTICAL_FIELDS = [
     "c_potencial_venda_currency",
     "c_qtd_consultas",
     "c_ultima_visita",
+    "created_at",
+    "modified_at",
+    # Sprint 1 fields — analytical, no PII
+    "c_c_etapa_funil",
+    "c_c_status_risco",
+    "c_c_ltv_total",
+    "c_c_dias_ultima_interacao",
+    "c_c_origem_lead",
+    "c_c_intencao_principal",
+    "c_c_procedimento_interesse",
+    "c_c_ctwa_clid",
+    "c_c_anuncio_origem",
+]
+
+# ---------------------------------------------------------------------------
+# Opportunity field policy — all analytical, no PII.
+# contact_id is a foreign key (join key), not PII.
+# c_o_* are custom fields added in Sprint 1 to the Opportunity entity.
+# ---------------------------------------------------------------------------
+OPPORTUNITY_FIELDS = [
+    "id",
+    "name",
+    "stage",
+    "amount",
+    "amount_currency",
+    "probability",
+    "close_date",
+    "contact_id",  # FK to contact — used for join in Silver/Gold
     "created_at",
     "modified_at",
 ]
@@ -202,7 +247,7 @@ def _postgres_engine():
 
 def export_recebimentos():
     """Exports billing table from MariaDB."""
-    logger.info("[1/3] Exporting c_recebimento (MariaDB)...")
+    logger.info("[1/4] Exporting c_recebimento (MariaDB)...")
     query = text(
         """
         SELECT
@@ -241,12 +286,16 @@ def export_contacts():
         epn.primary=1 ensures only the primary phone is returned.
       Tier 2 — FREE_TEXT_FIELDS (c_aisummary): regex + Presidio NER scrubbing.
       Tier 3 — ANALYTICAL_FIELDS: no scrubbing needed.
+
+    Sprint 1 fields exported (9 of 10):
+      c_c_etapa_funil, c_c_status_risco, c_c_ltv_total,
+      c_c_dias_ultima_interacao, c_c_origem_lead, c_c_intencao_principal,
+      c_c_procedimento_interesse, c_c_ctwa_clid, c_c_anuncio_origem.
+      EXCLUDED: c_c_fobias_dentarias (LGPD Art. 11 — health data).
     """
-    logger.info("[2/3] Exporting contact (MariaDB)...")
+    logger.info("[2/4] Exporting contact (MariaDB)...")
     logger.info("PII fields included by policy: %s", PII_ALLOWED_FIELDS)
 
-    # Analytical + address fields come directly from contact table.
-    # phone comes from JOIN with entity_phone_number + phone_number.
     query = text(
         """
         SELECT
@@ -265,7 +314,16 @@ def export_contacts():
             c.address_city,
             c.c_delivery_street,
             c.c_aisummary,
-            pn.name AS phone
+            pn.name AS phone,
+            c.c_c_etapa_funil,
+            c.c_c_status_risco,
+            c.c_c_ltv_total,
+            c.c_c_dias_ultima_interacao,
+            c.c_c_origem_lead,
+            c.c_c_intencao_principal,
+            c.c_c_procedimento_interesse,
+            c.c_c_ctwa_clid,
+            c.c_c_anuncio_origem
         FROM contact c
         LEFT JOIN entity_phone_number epn
             ON epn.entity_id = c.id
@@ -303,9 +361,58 @@ def export_contacts():
         logger.error("Check MARIADB_HOST, MARIADB_USER, MARIADB_PASSWORD in .env")
 
 
+def export_opportunities():
+    """
+    Exports opportunity data from EspoCRM (MariaDB) to Bronze Parquet.
+
+    All fields are analytical — no PII. contact_id is a foreign key used
+    for joining with dim_patients in Silver/Gold; it is not PII itself.
+
+    In the Gold layer, this becomes dim_opportunities. Each Opportunity
+    represents one treatment plan (Sprint 2 architectural decision: no
+    Consulta entity — each treatment = 1 Opportunity, sessions = Stream notes).
+
+    EspoCRM Opportunity table is named 'opportunity' in MariaDB.
+    """
+    logger.info("[3/4] Exporting opportunity (MariaDB)...")
+    query = text(
+        """
+        SELECT
+            id,
+            name,
+            stage,
+            amount,
+            amount_currency,
+            probability,
+            close_date,
+            contact_id,
+            created_at,
+            modified_at
+        FROM opportunity
+        WHERE deleted = 0
+    """
+    )
+    try:
+        engine = _mariadb_engine()
+        with engine.connect() as conn:
+            df = pd.read_sql(query, conn)
+        out_path = BRONZE_PATH / "opportunity" / f"dt={TODAY}"
+        out_path.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(out_path / "data.parquet", index=False)
+        logger.info(
+            "      Saved: %s (%d rows, %.0f KB)",
+            out_path / "data.parquet",
+            len(df),
+            (out_path / "data.parquet").stat().st_size / 1024,
+        )
+    except Exception as exc:
+        logger.error("Failed to export opportunity: %s", str(exc))
+        logger.error("Check MARIADB_HOST, MARIADB_USER, MARIADB_PASSWORD in .env")
+
+
 def export_rag_audit():
     """Exports RAG query logs from PostgreSQL. No PII — hashes only."""
-    logger.info("[3/3] Exporting rag_audit (PostgreSQL)...")
+    logger.info("[4/4] Exporting rag_audit (PostgreSQL)...")
     query = text(
         """
         SELECT id, created_at, collection, query_text, query_category,
@@ -337,6 +444,7 @@ def main():
     logger.info("=== Bronze export started | dt=%s ===", TODAY)
     export_recebimentos()
     export_contacts()
+    export_opportunities()
     export_rag_audit()
     logger.info("=== Bronze export complete ===")
     logger.info("Next step: run pipeline_bronze_silver DAG or dbt manually")
