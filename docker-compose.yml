@@ -2,11 +2,15 @@
 # IA Odonto Lab | Sprint 8
 #
 # Services:
-#   api — FastAPI application with LangChain + pgvector (Lina AI)
-#   db  — PostgreSQL 16 with pgvector extension (episodic memory store)
-#   dbt — Dedicated dbt + DuckDB container for Silver layer transformations
-#         Uses Docker profile "dbt" so it does not start automatically.
-#         Triggered on demand by Airflow or manually via docker run.
+#   api      — FastAPI application with LangChain + pgvector (Lina AI)
+#   db       — PostgreSQL 16 with pgvector extension (episodic memory store)
+#   dbt      — Dedicated dbt + DuckDB container for Silver layer transformations
+#              Uses Docker profile "dbt" so it does not start automatically.
+#              Triggered on demand by Airflow or manually via docker run.
+#   metabase — Business Intelligence dashboard (Sprint 2, 2026-06-13)
+#              Uses PostgreSQL db 'metabase' on ia-odonto-db for persistence.
+#              Previously run via manual docker run — now managed by compose.
+#              Data is safe: dashboards/queries persist in PostgreSQL, not container.
 #
 # Networks:
 #   default          — internal bridge network between api and db
@@ -17,7 +21,6 @@
 #   enforcing all traffic to flow through Cloudflare and Nginx Proxy Manager.
 #   Docker bypasses UFW by default, so loopback binding is the only reliable
 #   guarantee at the container level.
-
 services:
   api:
     build: .
@@ -34,7 +37,6 @@ services:
     networks:
       - default
       - stack-ia_default
-
   db:
     image: pgvector/pgvector:pg16
     container_name: ia-odonto-db
@@ -47,7 +49,6 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
-
   dbt:
     build:
       context: .
@@ -68,10 +69,26 @@ services:
       - dbt
     networks:
       - default
-
+  metabase:
+    image: metabase/metabase:latest
+    container_name: ia_metabase
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: metabase
+      MB_DB_PORT: 5432
+      MB_DB_USER: postgres
+      MB_DB_PASS: postgres
+      MB_DB_HOST: ia-odonto-db
+      JAVA_TIMEZONE: America/Sao_Paulo
+    depends_on:
+      - db
+    restart: unless-stopped
+    networks:
+      - default
 volumes:
   pgdata:
-
 networks:
   default:
     driver: bridge
