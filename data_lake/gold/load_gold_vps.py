@@ -1,13 +1,20 @@
-# data_lake/gold/load_gold_vps.py
 """
+data_lake/gold/load_gold_vps.py
 IA Odonto Lab — Silver (DuckDB) -> Gold Layer (PostgreSQL VPS)
 
 Reads Silver models from silver.duckdb and loads the Star Schema
-into ia-odonto-db on the VPS.
+defined in gold_schema_vps.sql into ia-odonto-db on the VPS.
 
-Sprint 2 additions:
-  - dim_patients now carries 9 Sprint 1 analytical fields
-  - dim_opportunities loaded from stg_opportunities (new)
+Sprint 2 (2026-05-28):
+  - dim_patients extended with 9 Sprint 1 CRM fields
+  - dim_opportunities added (new table, requires migration first)
+  - load_contacts() reads Sprint 1 fields from fct_pipeline
+  - load_dim_opportunities() reads stg_opportunities
+
+Sprint 2 (2026-06-13):
+  - load_procedimentos() added
+  - load_fact_procedimentos() added
+  - All NA checks use pd.isna() consistently (no ambiguous bool on NA)
 
 Usage (from project root):
     python data_lake/gold/load_gold_vps.py
@@ -80,8 +87,10 @@ def read_silver(query: str) -> pd.DataFrame:
 
 def load_contacts() -> pd.DataFrame:
     """
-    Joins fct_pipeline (analytical) with stg_contacts (identity + Sprint 1 fields).
-    Sprint 2: includes all 9 Sprint 1 analytical fields for dim_patients.
+    Joins fct_pipeline (analytical + Sprint 1 CRM fields) with stg_contacts (identity).
+    Sprint 2: includes etapa_funil, status_risco, ltv_crm, dias_ultima_interacao,
+              origem_lead, intencao_principal, procedimento_interesse,
+              ctwa_clid, anuncio_origem.
     """
     return read_silver(
         """
@@ -97,10 +106,10 @@ def load_contacts() -> pd.DataFrame:
             p.created_at                AS first_contact,
             p.ultima_visita             AS last_contact,
             p.qtd_consultas             AS total_visits,
-            -- Sprint 1 analytical fields
+            -- Sprint 1 CRM fields
             p.etapa_funil,
             p.status_risco,
-            p.ltv_total_lina,
+            CAST(p.ltv_crm AS DOUBLE)   AS ltv_crm,
             p.dias_ultima_interacao,
             p.origem_lead,
             p.intencao_principal,
@@ -115,11 +124,7 @@ def load_contacts() -> pd.DataFrame:
 
 
 def load_opportunities() -> pd.DataFrame:
-    """
-    Reads stg_opportunities from Silver.
-    Each row = one treatment plan (Opportunity in EspoCRM).
-    contact_id is hashed (contato_hash) for joining with dim_patients.
-    """
+    """Reads stg_opportunities from Silver DuckDB."""
     return read_silver(
         """
         SELECT
@@ -127,13 +132,40 @@ def load_opportunities() -> pd.DataFrame:
             contato_hash,
             nome_oportunidade,
             stage,
-            CAST(valor AS DOUBLE)       AS valor,
-            valor_moeda,
+            last_stage,
+            CAST(valor AS DOUBLE)            AS valor,
+            moeda,
             probabilidade,
+            origem_lead,
             data_fechamento_prevista,
+            procedimento,
+            capi_enviado,
+            capi_enviado_em,
+            CAST(valor_realizado AS DOUBLE)  AS valor_realizado,
+            valor_realizado_moeda,
+            capi_evento_tipo,
+            ctwa_clid,
+            origem_lead_custom,
             created_at,
             modified_at
         FROM main_staging.stg_opportunities
+        """
+    )
+
+
+def load_procedimentos() -> pd.DataFrame:
+    """Reads stg_procedimentos from Silver DuckDB."""
+    return read_silver(
+        """
+        SELECT
+            opportunity_hash,
+            procedimento_hash,
+            procedimento,
+            categoria,
+            observacao,
+            created_at,
+            modified_at
+        FROM main_staging.stg_procedimentos
         """
     )
 
@@ -206,11 +238,9 @@ def load_dim_date(conn, df: pd.DataFrame) -> None:
 
 def load_dim_patients(conn, df: pd.DataFrame) -> None:
     """
-    Upserts dim_patients with Sprint 1 analytical fields.
-    Nine new columns added in Sprint 2: etapa_funil, status_risco,
-    ltv_total_lina, dias_ultima_interacao, origem_lead, intencao_principal,
-    procedimento_interesse, ctwa_clid, anuncio_origem.
-    These are NULL for contacts created before Sprint 1 was deployed.
+    Loads dim_patients with Sprint 1 CRM fields.
+    Requires migration 003_sprint2_gold_schema.sql to have been run.
+    All NA checks use pd.isna() to avoid ambiguous boolean on pandas NA.
     """
     df = df.copy()
 
@@ -221,8 +251,7 @@ def load_dim_patients(conn, df: pd.DataFrame) -> None:
     for col in ["nome", "telefone", "bairro", "cidade", "endereco_entrega"]:
         df[col] = df[col].fillna("") if col in df.columns else ""
 
-    # Sprint 1 nullable fields — fill with None (not empty string)
-    sprint1_str_cols = [
+    for col in [
         "etapa_funil",
         "status_risco",
         "origem_lead",
@@ -230,26 +259,11 @@ def load_dim_patients(conn, df: pd.DataFrame) -> None:
         "procedimento_interesse",
         "ctwa_clid",
         "anuncio_origem",
-    ]
-    for col in sprint1_str_cols:
-        if col in df.columns:
-            df[col] = df[col].where(df[col].notna(), other=None)
-        else:
+        "ltv_crm",
+        "dias_ultima_interacao",
+    ]:
+        if col not in df.columns:
             df[col] = None
-
-    if "ltv_total_lina" in df.columns:
-        df["ltv_total_lina"] = df["ltv_total_lina"].where(
-            df["ltv_total_lina"].notna(), other=None
-        )
-    else:
-        df["ltv_total_lina"] = None
-
-    if "dias_ultima_interacao" in df.columns:
-        df["dias_ultima_interacao"] = df["dias_ultima_interacao"].where(
-            df["dias_ultima_interacao"].notna(), other=None
-        )
-    else:
-        df["dias_ultima_interacao"] = None
 
     rows = [
         (
@@ -264,23 +278,15 @@ def load_dim_patients(conn, df: pd.DataFrame) -> None:
             None if pd.isna(r.first_contact) else r.first_contact,
             None if pd.isna(r.last_contact) else r.last_contact,
             r.total_visits,
-            r.etapa_funil,
-            r.status_risco,
-            (
-                None
-                if r.ltv_total_lina is None or pd.isna(r.ltv_total_lina)
-                else float(r.ltv_total_lina)
-            ),
-            (
-                None
-                if r.dias_ultima_interacao is None or pd.isna(r.dias_ultima_interacao)
-                else int(r.dias_ultima_interacao)
-            ),
-            r.origem_lead,
-            r.intencao_principal,
-            r.procedimento_interesse,
-            r.ctwa_clid,
-            r.anuncio_origem,
+            None if pd.isna(r.etapa_funil) else r.etapa_funil,
+            None if pd.isna(r.status_risco) else r.status_risco,
+            None if pd.isna(r.ltv_crm) else float(r.ltv_crm),
+            None if pd.isna(r.dias_ultima_interacao) else int(r.dias_ultima_interacao),
+            None if pd.isna(r.origem_lead) else r.origem_lead,
+            None if pd.isna(r.intencao_principal) else r.intencao_principal,
+            None if pd.isna(r.procedimento_interesse) else r.procedimento_interesse,
+            None if pd.isna(r.ctwa_clid) else r.ctwa_clid,
+            None if pd.isna(r.anuncio_origem) else r.anuncio_origem,
         )
         for r in df.itertuples(index=False)
     ]
@@ -292,7 +298,7 @@ def load_dim_patients(conn, df: pd.DataFrame) -> None:
                 (patient_key, nome, telefone, bairro, cidade, endereco_entrega,
                  status_atendimento, pipeline_segment, first_contact, last_contact,
                  total_visits,
-                 etapa_funil, status_risco, ltv_total_lina, dias_ultima_interacao,
+                 etapa_funil, status_risco, ltv_crm, dias_ultima_interacao,
                  origem_lead, intencao_principal, procedimento_interesse,
                  ctwa_clid, anuncio_origem)
             VALUES %s
@@ -308,7 +314,7 @@ def load_dim_patients(conn, df: pd.DataFrame) -> None:
                 total_visits           = EXCLUDED.total_visits,
                 etapa_funil            = EXCLUDED.etapa_funil,
                 status_risco           = EXCLUDED.status_risco,
-                ltv_total_lina         = EXCLUDED.ltv_total_lina,
+                ltv_crm                = EXCLUDED.ltv_crm,
                 dias_ultima_interacao  = EXCLUDED.dias_ultima_interacao,
                 origem_lead            = EXCLUDED.origem_lead,
                 intencao_principal     = EXCLUDED.intencao_principal,
@@ -324,29 +330,41 @@ def load_dim_patients(conn, df: pd.DataFrame) -> None:
 
 def load_dim_opportunities(conn, df: pd.DataFrame) -> None:
     """
-    Upserts dim_opportunities from stg_opportunities.
-    opportunity_hash is the PK. contato_hash FK references dim_patients.
-    Requires dim_patients to be loaded first (FK constraint).
+    Loads dim_opportunities Gold table.
+    All NA checks use pd.isna() to avoid ambiguous boolean on pandas NA.
     """
+    if df.empty:
+        log.info("dim_opportunities: no rows to load (opportunity table empty)")
+        return
+
     df = df.copy()
-
-    for col in ["data_fechamento_prevista", "created_at", "modified_at"]:
+    for col in ["data_fechamento_prevista", "capi_enviado_em"]:
         df[col] = df[col].where(df[col].notna(), other=None)
-
-    df["valor"] = df["valor"].fillna(0.0)
+    for col in ["valor", "valor_realizado"]:
+        df[col] = df[col].fillna(0.0)
     df["probabilidade"] = df["probabilidade"].fillna(0).astype(int)
-    df["valor_moeda"] = df["valor_moeda"].fillna("BRL")
+    df["capi_enviado"] = df["capi_enviado"].fillna(False).astype(bool)
 
     rows = [
         (
             r.opportunity_hash,
-            r.contato_hash,
-            r.nome_oportunidade,
-            r.stage,
+            None if pd.isna(r.contato_hash) else r.contato_hash,
+            None if pd.isna(r.nome_oportunidade) else r.nome_oportunidade,
+            None if pd.isna(r.stage) else r.stage,
+            None if pd.isna(r.last_stage) else r.last_stage,
             float(r.valor),
-            r.valor_moeda,
+            None if pd.isna(r.moeda) else r.moeda,
             int(r.probabilidade),
+            None if pd.isna(r.origem_lead) else r.origem_lead,
             None if pd.isna(r.data_fechamento_prevista) else r.data_fechamento_prevista,
+            None if pd.isna(r.procedimento) else r.procedimento,
+            bool(r.capi_enviado),
+            None if pd.isna(r.capi_enviado_em) else r.capi_enviado_em,
+            float(r.valor_realizado),
+            None if pd.isna(r.valor_realizado_moeda) else r.valor_realizado_moeda,
+            None if pd.isna(r.capi_evento_tipo) else r.capi_evento_tipo,
+            None if pd.isna(r.ctwa_clid) else r.ctwa_clid,
+            None if pd.isna(r.origem_lead_custom) else r.origem_lead_custom,
             None if pd.isna(r.created_at) else r.created_at,
             None if pd.isna(r.modified_at) else r.modified_at,
         )
@@ -357,22 +375,81 @@ def load_dim_opportunities(conn, df: pd.DataFrame) -> None:
             cur,
             """
             INSERT INTO gold.dim_opportunities
-                (opportunity_hash, contato_hash, nome_oportunidade, stage,
-                 valor, valor_moeda, probabilidade,
-                 data_fechamento_prevista, created_at, modified_at)
+                (opportunity_key, patient_key, nome_oportunidade, stage, last_stage,
+                 valor, moeda, probabilidade, origem_lead, data_fechamento_prevista,
+                 procedimento, capi_enviado, capi_enviado_em, valor_realizado,
+                 valor_realizado_moeda, capi_evento_tipo, ctwa_clid, origem_lead_custom,
+                 created_at, modified_at)
             VALUES %s
-            ON CONFLICT (opportunity_hash) DO UPDATE SET
-                nome_oportunidade       = EXCLUDED.nome_oportunidade,
-                stage                   = EXCLUDED.stage,
-                valor                   = EXCLUDED.valor,
-                probabilidade           = EXCLUDED.probabilidade,
+            ON CONFLICT (opportunity_key) DO UPDATE SET
+                patient_key              = EXCLUDED.patient_key,
+                nome_oportunidade        = EXCLUDED.nome_oportunidade,
+                stage                    = EXCLUDED.stage,
+                last_stage               = EXCLUDED.last_stage,
+                valor                    = EXCLUDED.valor,
+                moeda                    = EXCLUDED.moeda,
+                probabilidade            = EXCLUDED.probabilidade,
+                origem_lead              = EXCLUDED.origem_lead,
                 data_fechamento_prevista = EXCLUDED.data_fechamento_prevista,
-                modified_at             = EXCLUDED.modified_at
+                procedimento             = EXCLUDED.procedimento,
+                capi_enviado             = EXCLUDED.capi_enviado,
+                capi_enviado_em          = EXCLUDED.capi_enviado_em,
+                valor_realizado          = EXCLUDED.valor_realizado,
+                valor_realizado_moeda    = EXCLUDED.valor_realizado_moeda,
+                capi_evento_tipo         = EXCLUDED.capi_evento_tipo,
+                ctwa_clid                = EXCLUDED.ctwa_clid,
+                origem_lead_custom       = EXCLUDED.origem_lead_custom,
+                modified_at              = EXCLUDED.modified_at
             """,
             rows,
         )
     conn.commit()
     log.info("dim_opportunities: %d rows upserted", len(rows))
+
+
+def load_fact_procedimentos(conn, df: pd.DataFrame) -> None:
+    """
+    Loads fact_procedimentos Gold table.
+    Requires migration 004_create_fact_procedimentos.sql to have been run.
+    opportunity_key joins to dim_opportunities.opportunity_key.
+    """
+    if df.empty:
+        log.info("fact_procedimentos: no rows to load")
+        return
+
+    df = df.copy()
+    df["observacao"] = df["observacao"].fillna("")
+
+    rows = [
+        (
+            r.opportunity_hash,
+            r.procedimento_hash,
+            None if pd.isna(r.procedimento) else r.procedimento,
+            None if pd.isna(r.categoria) else r.categoria,
+            r.observacao,
+            None if pd.isna(r.created_at) else r.created_at,
+            None if pd.isna(r.modified_at) else r.modified_at,
+        )
+        for r in df.itertuples(index=False)
+    ]
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO gold.fact_procedimentos
+                (opportunity_key, procedimento_key, procedimento, categoria,
+                 observacao, created_at, modified_at)
+            VALUES %s
+            ON CONFLICT (opportunity_key, procedimento_key) DO UPDATE SET
+                procedimento = EXCLUDED.procedimento,
+                categoria    = EXCLUDED.categoria,
+                observacao   = EXCLUDED.observacao,
+                modified_at  = EXCLUDED.modified_at
+            """,
+            rows,
+        )
+    conn.commit()
+    log.info("fact_procedimentos: %d rows upserted", len(rows))
 
 
 def load_fact_interactions(
@@ -431,25 +508,28 @@ def main():
         )
 
     contacts_df = load_contacts()
+    opportunities_df = load_opportunities()
+    procedimentos_df = load_procedimentos()
     ltv_df = load_ltv()
     pipeline_df = load_pipeline()
-    opportunities_df = load_opportunities()
     dim_date_df = build_dim_date()
 
     log.info(
-        "Silver rows — contacts:%d ltv:%d pipeline:%d opportunities:%d dim_date:%d",
+        "Silver rows — contacts:%d opportunities:%d procedimentos:%d ltv:%d pipeline:%d dim_date:%d",
         len(contacts_df),
+        len(opportunities_df),
+        len(procedimentos_df),
         len(ltv_df),
         len(pipeline_df),
-        len(opportunities_df),
         len(dim_date_df),
     )
 
     conn = get_pg_conn()
     try:
         load_dim_date(conn, dim_date_df)
-        load_dim_patients(conn, contacts_df)  # must run before dim_opportunities (FK)
+        load_dim_patients(conn, contacts_df)
         load_dim_opportunities(conn, opportunities_df)
+        load_fact_procedimentos(conn, procedimentos_df)
         load_fact_interactions(conn, ltv_df, pipeline_df)
     finally:
         conn.close()
