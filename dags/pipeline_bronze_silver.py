@@ -1,6 +1,6 @@
 """
 DAG: pipeline_bronze_silver
-Schedule: every 30 minutes from 08:00 to 22:30 UTC-3 + nightly run at 02:00 UTC-3.
+Schedule: every 30 minutes.
 Purpose: Orchestrates the full Bronze → Silver data pipeline for the dental clinic.
 
 Pipeline stages:
@@ -11,26 +11,19 @@ Pipeline stages:
                             Empty files are allowed (no patients on a given day) — logged as warning.
   3. dbt_run              — Runs dbt models to transform Bronze Parquet into Silver DuckDB.
                             Produces: stg_contacts, stg_recebimentos, stg_ai_summaries,
+                                      stg_opportunities, stg_procedimentos,
                                       fct_ltv, fct_pipeline, fct_ai_performance.
-  4. dbt_test             — Runs dbt data quality tests (55 tests, 3 expected warnings).
+  4. dbt_test             — Runs dbt data quality tests.
                             Fails the DAG if any test fails beyond known warnings.
   5. rotate_parquet       — Deletes Bronze Parquet partitions older than 90 days.
-                            Industry standard: Bronze is a raw snapshot; Silver consolidates.
-                            90-day window covers auditing, emergency reprocessing, debugging.
-  6. cleanup_buffer       — Deletes processed WhatsApp messages older than 30 days from
-                            message_buffer table. LGPD compliance — no retention beyond need.
-  7. trigger_gold         — Triggers pipeline_gold DAG to run immediately after Silver completes.
-                            Gold never runs on a fixed schedule — always triggered by this DAG.
+  6. cleanup_buffer       — Deletes processed WhatsApp messages older than 30 days.
+  7. trigger_gold         — Triggers pipeline_gold DAG immediately after Silver completes.
 
 On failure: sends alert via n8n webhook → Gmail.
 
-Schedule rationale:
-  - Every 30 minutes during clinic hours ensures BI data is always fresh (< 30min lag).
-  - Nightly run at 02:00 ensures backups at 03:00 always have up-to-date Silver data.
-  - TriggerDagRunOperator chains Silver → Gold without fixed time offsets.
-
-Note: dbt runs inside ia-odonto-api container (dbt-core + dbt-duckdb in requirements.txt).
-      The ia-odonto-dbt image was retired — all transformations use the main API container.
+Sprint 2 (2026-06-13):
+  - Added opportunity, c_procedimento, c_opportunity_procedimento to BRONZE_TABLES
+  - Updated EXPECTED_COLUMNS for new tables
 """
 
 from __future__ import annotations
@@ -46,7 +39,7 @@ from airflow.operators.python import PythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 # ---------------------------------------------------------------------------
-# Default arguments — applied to every task unless overridden
+# Default arguments
 # ---------------------------------------------------------------------------
 DEFAULT_ARGS = {
     "owner": "renato",
@@ -58,7 +51,7 @@ DEFAULT_ARGS = {
 }
 
 # ---------------------------------------------------------------------------
-# Paths — resolved from environment variables set in the Airflow container
+# Paths
 # ---------------------------------------------------------------------------
 BRONZE_PATH = os.environ.get("BRONZE_PATH", "/app/data_lake/bronze")
 SILVER_PATH = os.environ.get("SILVER_PATH", "/app/data_lake/silver")
@@ -70,11 +63,19 @@ DBT_PROFILES = os.environ.get(
 )
 
 # Tables exported to Bronze — used for validation
-BRONZE_TABLES = ["contact", "c_recebimento", "rag_audit"]
+# Sprint 2: added opportunity, c_procedimento, c_opportunity_procedimento
+BRONZE_TABLES = [
+    "contact",
+    "c_recebimento",
+    "rag_audit",
+    "opportunity",
+    "c_procedimento",
+    "c_opportunity_procedimento",
+]
 
 
 # ---------------------------------------------------------------------------
-# Failure callback — sends alert via n8n webhook → Gmail
+# Failure callback
 # ---------------------------------------------------------------------------
 def _on_failure_callback(context):
     dag_id = context["dag"].dag_id
@@ -103,12 +104,6 @@ def _on_failure_callback(context):
 
 
 # ---------------------------------------------------------------------------
-# Task 1 — Export Bronze (with PII scrubbing via regex + Presidio NER)
-# ---------------------------------------------------------------------------
-EXPORT_CMD = "docker exec ia-odonto-api python /app/data_lake/bronze/export_bronze.py"
-
-
-# ---------------------------------------------------------------------------
 # Task 2 — Validate Parquet
 # ---------------------------------------------------------------------------
 def validate_parquet(**context):
@@ -125,6 +120,9 @@ def validate_parquet(**context):
         "contact": ["id", "c_status_atendimento", "c_aisummary", "created_at"],
         "c_recebimento": ["id", "contato_id", "valor", "created_at"],
         "rag_audit": ["id", "created_at", "collection", "results_returned"],
+        "opportunity": ["id", "name", "stage", "contact_id", "created_at"],
+        "c_procedimento": ["id", "nome", "categoria", "created_at"],
+        "c_opportunity_procedimento": ["id", "opportunity_id", "c_procedimento_id"],
     }
 
     for table in BRONZE_TABLES:
@@ -168,27 +166,22 @@ def validate_parquet(**context):
 
 
 # ---------------------------------------------------------------------------
-# Task 3 — dbt run (Silver transformation)
-# Runs inside ia-odonto-api — dbt-core + dbt-duckdb installed via requirements.txt
+# Task commands
 # ---------------------------------------------------------------------------
+EXPORT_CMD = "docker exec ia-odonto-api python /app/data_lake/bronze/export_bronze.py"
+
 DBT_RUN_CMD = (
     "docker exec ia-odonto-api "
     "bash -c 'cd /app/data_lake/silver/ia_odonto_silver && dbt run --profiles-dir . 2>&1 "
     "| tee /app/logs/silver_run.log; exit ${PIPESTATUS[0]}'"
 )
 
-# ---------------------------------------------------------------------------
-# Task 4 — dbt test (Silver quality gates)
-# ---------------------------------------------------------------------------
 DBT_TEST_CMD = (
     "docker exec ia-odonto-api "
     "bash -c 'cd /app/data_lake/silver/ia_odonto_silver && dbt test --profiles-dir . 2>&1 "
     "| tee -a /app/logs/silver_run.log; exit ${PIPESTATUS[0]}'"
 )
 
-# ---------------------------------------------------------------------------
-# Task 5 — Rotate Bronze Parquet (keep last 90 days)
-# ---------------------------------------------------------------------------
 ROTATE_PARQUET_CMD = (
     "docker exec ia-odonto-api "
     "find /app/data_lake/bronze -mindepth 2 -maxdepth 2 -type d -mtime +90 "
@@ -196,9 +189,6 @@ ROTATE_PARQUET_CMD = (
     "&& echo 'Bronze rotation complete — partitions older than 90 days deleted.'"
 )
 
-# ---------------------------------------------------------------------------
-# Task 6 — Cleanup message_buffer
-# ---------------------------------------------------------------------------
 CLEANUP_CMD = (
     "docker exec ia_postgres psql -U evolution -d evolution -c "
     '"DELETE FROM message_buffer '
@@ -208,8 +198,6 @@ CLEANUP_CMD = (
 
 # ---------------------------------------------------------------------------
 # DAG definition
-# Schedule: nightly at 05:00 UTC (02:00 Recife) + every 30min from 11:00-01:30 UTC
-#           which corresponds to 08:00-22:30 Recife (UTC-3)
 # ---------------------------------------------------------------------------
 with DAG(
     dag_id="pipeline_bronze_silver",
